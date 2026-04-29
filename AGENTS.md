@@ -4,27 +4,31 @@
 
 **Fabric Sales Agent Accelerator** is an open-source reference implementation demonstrating how to combine Microsoft Fabric Data Agent with agentic AI workflows. It uses the Wide World Importers sample dataset (wholesale novelty goods).
 
-## Architecture
+The repo demonstrates progressive architecture tiers — from a simple Copilot CLI demo to enterprise multi-agent orchestration — letting users choose the approach that fits their team.
 
-Four sub-agents orchestrated by a pluggable front-end:
+## Current Architecture (v1 + v2)
 
-1. **Fabric Data Agent** — NL→SQL/DAX/KQL queries over OneLake data (built-in MCP server)
-2. **Researcher Agent** — Web search for customer intelligence (custom MCP server)
-3. **SharePoint Agent** — Internal doc retrieval via Graph API (custom MCP server)
-4. **Report Generator** — Template-based DOCX/PPTX generation with citations
+### v1: Copilot CLI
+- **Fabric Data Agent** — NL→SQL/DAX queries over OneLake data (built-in MCP server)
+- **Web research** — handled by Copilot CLI's built-in `web_search` and `web_fetch` tools
+- **SharePoint docs** — handled by Copilot CLI's built-in SharePoint/OneDrive tools
+- **Report Generator** — template-based DOCX/PPTX generation with citations
+- **Skills** — CLI skill files that orchestrate the workflow
 
-Four consumption surfaces (all demonstrated, none "picked"):
-- GitHub Copilot (VS Code / CLI) via MCP
-- M365 Copilot via direct Agent Store publish
-- Copilot Studio via connected agent
-- Azure AI Foundry via Python SDK + M365 publish
+### v2: Copilot SDK
+Same capabilities as v1, wrapped in the GitHub Copilot SDK (`github-copilot-sdk`) for
+programmatic invocation from standalone apps.
+
+### Future Tiers (not yet implemented)
+- **v3:** Copilot SDK → Docker → Foundry Hosted Agents → M365 publish
+- **v4:** Microsoft Agent Framework multi-agent orchestration with upgraded custom agents
 
 ## Coding Standards
 
 - **Language:** Python 3.11+
 - **Linting:** Ruff (rules: E, F, I, N, W, UP). Line length 120.
-- **Type checking:** mypy strict for `src/agents/`, lenient for integration code
-- **Testing:** pytest. Unit tests mock external services. Integration tests verify MCP protocol.
+- **Type checking:** mypy strict for `src/agents/report_generator/`
+- **Testing:** pytest. Unit tests mock external services.
 - **Formatting:** Ruff formatter
 - **IaC:** Bicep (Azure-native). Modules in `infra/modules/`.
 - **Commits:** Conventional commits (`feat:`, `fix:`, `docs:`, `infra:`, `test:`)
@@ -33,19 +37,20 @@ Four consumption surfaces (all demonstrated, none "picked"):
 
 | Directory | Purpose |
 |-----------|---------|
-| `src/agents/` | Sub-agent MCP servers and report generator |
-| `src/orchestrator/` | Azure AI Foundry orchestrator agent |
+| `src/agents/report_generator/` | DOCX/PPTX report generation with citations |
 | `src/cli/skills/` | Copilot CLI skill definitions |
-| `infra/` | Bicep IaC (Fabric capacity, Key Vault, Entra app, Foundry) |
+| `src/sdk/` | Copilot SDK agent wrapper (v2) |
 | `fabric/` | Fabric Data Agent config, instructions, few-shot examples |
-| `demo/` | Sample data (WWI), SharePoint demo docs, demo scripts |
+| `infra/` | Bicep IaC (Fabric capacity, Key Vault, Entra app) |
+| `demo/` | Sample data (WWI), demo scripts |
 | `docs/` | Architecture, security, setup, surfaces comparison |
-| `tests/` | Unit, integration, and eval tests |
+| `tests/` | Unit and eval tests |
+| `archive/` | Preserved v3/v4 code: custom Researcher + SharePoint MCP servers, orchestrator stubs |
 
 ## Important Notes
 
 - **LLM-agnostic** — never hardcode a model provider. Config accepts any endpoint.
 - **Citations first-class** — every generated report must include source attribution.
 - **Fabric MCP is built-in** — use the Data Agent's native MCP server, not a custom wrapper.
-- **Auth split** — interactive for CLI, managed identity for Foundry, OIDC for CI, bot reg for M365.
+- **CLI built-in tools preferred** — web research and SharePoint retrieval use CLI's native capabilities, not custom MCP servers.
 - **No customer data in repo** — all data is Wide World Importers (Microsoft sample).

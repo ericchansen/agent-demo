@@ -1,33 +1,52 @@
 ---
 name: Research Customer
 description: >
-  Research a customer using the Researcher Agent. Returns recent news,
-  earnings data, strategy insights, and key metrics.
+  Research a customer using the web. Returns recent news, earnings data,
+  strategy insights, and key metrics with citations.
 ---
 
 # Research Customer
 
 ## What this skill does
 
-Calls the **Researcher Agent** (`researcher-agent` MCP server) to search the
-open web for intelligence about a specific company. Returns a structured
-summary with recent articles, key financial metrics, and strategic insights.
+Uses Copilot CLI's built-in `web_search` and `web_fetch` tools to investigate
+a company from multiple angles — news, financials, strategy, competitive
+landscape. Produces a structured summary with citations for every claim.
 
 ## How it works
 
-1. The skill calls the `research_company` tool on the `researcher-agent` MCP
-   server with the customer name and optional focus areas.
-2. The agent searches the web (via Bing or Tavily, depending on your
-   `SEARCH_PROVIDER` env var) and returns:
-   - **Summary** — a concise overview of the company's current position.
-   - **Articles** — recent news with title, URL, date, and snippet.
-   - **Key Metrics** — revenue growth, market cap, headcount, etc.
+1. Run multiple web searches to cover different angles:
+   - `"<customer>" recent news` — latest developments
+   - `"<customer>" earnings revenue` — financial health
+   - `"<customer>" strategy expansion` — strategic direction
+   - `"<customer>" competitors` — competitive landscape
+2. For the most promising results, use `web_fetch` to read the full page
+   content (not just snippets) for deeper insight.
+3. Synthesize findings into a structured report:
+   - **Company Overview** — what the company does, market position
+   - **Recent News** — notable developments with dates and source URLs
+   - **Financial Highlights** — revenue, growth, key metrics
+   - **Strategic Direction** — where the company is headed
+   - **Competitive Landscape** — key competitors and differentiation
+4. Cite every factual claim with its source URL.
 
 ## Example invocations
 
 ```
 Research Tailspin Toys — focus on recent news and expansion
 ```
+
+```
+Research NCR Voyix — earnings, digital transformation strategy, competitors
+```
+
+```
+What's going on with Contoso Ltd lately?
+```
+
+## Prerequisites
+
+- Internet access (Copilot CLI's `web_search` tool must be available)
 
 ```
 Research Contoso Ltd with a focus on earnings and strategy

@@ -4,9 +4,9 @@
 RG ?= fsa-demo-rg
 CAPACITY_NAME ?= fsa-demo-capacity
 
-.PHONY: lint format format-check typecheck test test-integration test-eval \
+.PHONY: lint format format-check typecheck test test-eval \
         infra-validate infra-deploy infra-teardown load-data \
-        serve-researcher serve-sharepoint demo diagrams clean
+        demo diagrams clean
 
 lint:
 	ruff check src/ tests/
@@ -22,9 +22,6 @@ typecheck:
 
 test:
 	pytest tests/unit/ -v
-
-test-integration:
-	pytest tests/integration/ -v
 
 test-eval:
 	python tests/eval/run_eval.py
@@ -45,24 +42,17 @@ infra-teardown:
 load-data:
 	python demo/load-wwi-data.py
 
-serve-researcher:
-	python -m src.agents.researcher.mcp_server
-
-serve-sharepoint:
-	python -m src.agents.sharepoint.mcp_server
-
 demo:
-	@echo "=== Fabric Sales Agent Accelerator — Full Demo ==="
+	@echo "=== Fabric Sales Agent Accelerator — Demo ==="
 	@echo ""
-	@echo "1. Load sample data:        make load-data"
-	@echo "2. Start researcher agent:   make serve-researcher  (in terminal 1)"
-	@echo "3. Start SharePoint agent:   make serve-sharepoint  (in terminal 2)"
-	@echo "4. Open the Fabric Data Agent in your browser and start chatting."
+	@echo "v1 (Copilot CLI):"
+	@echo "  1. Deploy infra:           make infra-deploy"
+	@echo "  2. Load sample data:       make load-data"
+	@echo "  3. Add Fabric MCP URL to your Copilot CLI MCP config"
+	@echo "  4. Ask: 'Prepare an account plan for Tailspin Toys'"
 	@echo ""
-	@echo "Prerequisites:"
-	@echo "  - Fabric workspace provisioned (make infra-deploy)"
-	@echo "  - .env configured with connection strings"
-	@echo "  - Python venv activated with dependencies installed"
+	@echo "v2 (Copilot SDK):"
+	@echo "  python -m src.sdk.cli 'Prepare an account plan for Tailspin Toys'"
 
 diagrams:
 	python docs/diagrams/generate.py

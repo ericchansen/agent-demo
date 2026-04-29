@@ -30,7 +30,7 @@ jobs:
         run: mypy src/
 
       - name: Unit tests
-        run: pytest tests/unit/
+        run: pytest tests/unit/ -v
 
   validate-bicep:
     runs-on: ubuntu-latest

@@ -2,8 +2,8 @@
 name: Generate Account Plan
 description: >
   Generate a comprehensive account plan for a Wide World Importers customer,
-  combining pipeline data from Fabric, web research, and internal SharePoint
-  documents into a DOCX report with full citations.
+  combining Fabric pipeline data, web research, and internal documents into
+  a DOCX report with full citations.
 ---
 
 # Generate Account Plan
@@ -16,11 +16,12 @@ by orchestrating three data sources and the report generator:
 1. **Pipeline data** — query the Fabric Data Agent (`wwi-sales-data` MCP) for
    the customer's open deals, values, stages, expected close dates, and
    territory breakdown.
-2. **Web research** — call the Researcher Agent (`researcher-agent` MCP) to
+2. **Web research** — use the built-in `web_search` and `web_fetch` tools to
    gather recent news articles, earnings data, strategy insights, and key
-   metrics about the customer.
-3. **Internal documents** — call the SharePoint Agent (`sharepoint-agent` MCP)
-   to find prior proposals, existing account plans, QBR decks, and sales
+   metrics about the customer. Search multiple angles (financials, strategy,
+   expansion, competitors) and read full pages for depth.
+3. **Internal documents** — use the built-in SharePoint/OneDrive tools to
+   find prior proposals, existing account plans, QBR decks, and sales
    playbooks related to the customer.
 4. **Report generation** — combine all collected data and generate a structured
    DOCX account plan with an executive summary, pipeline overview, customer
@@ -45,24 +46,29 @@ Capture: deal list, total pipeline value, weighted value, stage distribution.
 
 ### Step 2 — Research the customer
 
-Use the `researcher-agent` MCP server:
+Use the built-in `web_search` tool to investigate the customer from multiple
+angles. Run several searches to get comprehensive coverage:
 
-```
-Call research_company:
-  company_name: "<customer>"
-  focus_areas: "news, earnings, strategy, expansion"
-```
+1. `"<customer>" recent news 2025 2026` — latest developments
+2. `"<customer>" earnings revenue financial results` — financial health
+3. `"<customer>" strategy digital transformation` — strategic direction
+4. `"<customer>" competitors market position` — competitive landscape
 
-Capture: summary, recent articles (title, URL, date, snippet), key metrics.
+For the most relevant results, use `web_fetch` to retrieve and read the full
+page content — don't rely only on search snippets.
+
+Capture: company summary, recent articles (with URLs and dates), key financial
+metrics, strategic direction, competitive position. Cite every fact.
 
 ### Step 3 — Find internal documents
 
-Use the `sharepoint-agent` MCP server:
+Use the built-in SharePoint/OneDrive tools to search for internal documents:
 
 ```
-Call search_documents:
-  query: "<customer> account plan OR proposal OR playbook"
+Search SharePoint for: "<customer> account plan OR proposal OR playbook"
 ```
+
+If relevant documents are found, retrieve their content for key insights.
 
 Capture: document names, URLs, excerpts, last-modified dates.
 
@@ -98,6 +104,4 @@ Create an account plan for Contoso Ltd — focus on their APAC expansion
 ## Prerequisites
 
 - `wwi-sales-data` MCP server configured with a valid Fabric Data Agent URL
-- `researcher-agent` MCP server available (requires `SEARCH_PROVIDER` env var)
-- `sharepoint-agent` MCP server available (set `SHAREPOINT_MODE=mock` for demo)
 - Python 3.11+ with project dependencies installed
