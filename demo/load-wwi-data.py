@@ -22,15 +22,16 @@ from pathlib import Path
 
 BASE_URL = (
     "https://fabrictutorialdata.blob.core.windows.net/"
-    "sampledata/WideWorldImportersDW/parquet"
+    "sampledata/WideWorldImportersDW/parquet/full"
 )
 
+# Table names as they appear in the blob storage (lowercase).
 TABLES: list[str] = [
-    "fact_Sale",
-    "dimension_Customer",
-    "dimension_Stock_Item",
-    "dimension_City",
-    "dimension_Employee",
+    "fact_sale",
+    "dimension_customer",
+    "dimension_stock_item",
+    "dimension_city",
+    "dimension_employee",
 ]
 
 
@@ -44,48 +45,61 @@ def _sizeof_fmt(num_bytes: int) -> str:
 
 
 def download_table(table: str, output_dir: Path, *, retries: int = 3) -> Path:
-    """Download a single Parquet table with retry logic and progress reporting."""
-    # WWI tutorial data uses: <base>/<table>/part-00000-<hash>.c000.snappy.parquet
-    # but also works with just <base>/<table>.parquet for the consolidated files.
-    # Try the directory-style path first, then fall back to flat file.
-    urls_to_try = [
-        f"{BASE_URL}/{table}/{table}.parquet",
-        f"{BASE_URL}/{table}.parquet",
-    ]
+    """Download a single Parquet table with retry logic and progress reporting.
 
-    dest = output_dir / f"{table}.parquet"
+    The WWI tutorial data is stored as partitioned Spark output: each table is a
+    directory containing multiple ``part-XXXXX-<hash>.snappy.parquet`` files.
+    We download part-00000 (the first partition) which is sufficient for demo purposes.
+    """
+    table_dir = output_dir / table
+    table_dir.mkdir(parents=True, exist_ok=True)
+
+    # Discover part files by listing the blob prefix
+    list_url = (
+        "https://fabrictutorialdata.blob.core.windows.net/sampledata"
+        f"?restype=container&comp=list&prefix=WideWorldImportersDW/parquet/full/{table}/part"
+    )
+
+    try:
+        with urllib.request.urlopen(list_url) as resp:  # noqa: S310
+            body = resp.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Cannot list blobs for {table}: {exc}") from exc
+
+    import re  # noqa: PLC0415
+
+    part_names = re.findall(r"<Name>([^<]*\.snappy\.parquet)</Name>", body)
+    if not part_names:
+        raise RuntimeError(f"No parquet parts found for {table}")
+
+    # Download just the first part for demo (keeps download fast)
+    part_name = part_names[0]
+    part_url = f"https://fabrictutorialdata.blob.core.windows.net/sampledata/{part_name}"
+    dest = table_dir / part_name.rsplit("/", 1)[-1]
+
     if dest.exists():
         print(f"  ✓ {table} — already exists ({_sizeof_fmt(dest.stat().st_size)})")
         return dest
 
-    last_error: Exception | None = None
-    for url in urls_to_try:
-        for attempt in range(1, retries + 1):
-            try:
-                print(f"  ↓ {table} (attempt {attempt}/{retries}) …", end="", flush=True)
-                t0 = time.monotonic()
-                urllib.request.urlretrieve(url, dest)  # noqa: S310
-                elapsed = time.monotonic() - t0
-                size = dest.stat().st_size
-                print(f" {_sizeof_fmt(size)} in {elapsed:.1f}s")
-                return dest
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-                if exc.code == 404:
-                    print(f" 404 — trying next URL pattern")
-                    break  # skip remaining retries for this URL
-                print(f" HTTP {exc.code} — retrying")
-            except urllib.error.URLError as exc:
-                last_error = exc
-                print(f" network error — retrying ({exc.reason})")
-            except OSError as exc:
-                last_error = exc
-                print(f" I/O error — retrying ({exc})")
-            time.sleep(2**attempt)  # exponential back-off
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"  ↓ {table} (attempt {attempt}/{retries}) …", end="", flush=True)
+            t0 = time.monotonic()
+            urllib.request.urlretrieve(part_url, dest)  # noqa: S310
+            elapsed = time.monotonic() - t0
+            size = dest.stat().st_size
+            print(f" {_sizeof_fmt(size)} in {elapsed:.1f}s")
+            return dest
+        except urllib.error.HTTPError as exc:
+            print(f" HTTP {exc.code}")
+            if attempt == retries:
+                raise RuntimeError(f"Failed to download {table}: HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            print(f" network error ({exc.reason})")
+            if attempt == retries:
+                raise RuntimeError(f"Failed to download {table}: {exc}") from exc
 
-    raise RuntimeError(
-        f"Failed to download {table} after trying all URL patterns"
-    ) from last_error
+    raise RuntimeError(f"Failed to download {table} after {retries} attempts")
 
 
 def download_all(output_dir: Path) -> list[Path]:

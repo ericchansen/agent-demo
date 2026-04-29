@@ -50,3 +50,4 @@ docs/diagrams/*.png
 # Temporary
 *.tmp
 *.bak
+demo/sample-data/
