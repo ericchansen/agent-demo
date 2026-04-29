@@ -1,8 +1,8 @@
 # Fabric Sales Agent Accelerator
 
-An open-source reference implementation showing how to combine **Microsoft Fabric Data Agent** with agentic AI workflows — a Researcher Agent (web), a SharePoint Agent (internal docs), and a Report Generator — surfaced through **multiple architecture options**.
+An open-source reference implementation showing how to combine **Microsoft Fabric Data Agent** with agentic AI workflows — surfaced through **progressive architecture tiers** from a simple CLI demo to enterprise multi-agent production.
 
-> **Choose Your Architecture:** This repo demonstrates four consumption surfaces — pick the one that fits your team.
+> **Choose Your Architecture:** This repo demonstrates four tiers — pick the one that fits your team.
 
 ## What It Does
 
@@ -13,28 +13,41 @@ A sales user asks a natural language question like *"Prepare an account plan for
 3. **Pulls internal context** from SharePoint (prior proposals, playbooks)
 4. **Generates a deliverable** (DOCX or PPTX) from templates with full source citations
 
-## Architecture Options
+## Architecture Tiers
 
-| Surface | Audience | Effort | Capabilities |
-|---------|----------|--------|-------------|
-| **GitHub Copilot (VS Code / CLI)** | Developers, power users | MCP config + skills | Full multi-agent workflow |
-| **M365 Copilot (Direct)** | Business users | Zero code | Fabric data queries only |
-| **Copilot Studio** | Business users | Low-code | Multi-source with connectors |
-| **Azure AI Foundry** | Pro developers | Python SDK | Full orchestration + M365 publish |
+| Tier | Runtime | Deploy | M365 | Status |
+|------|---------|--------|------|--------|
+| **v1: Copilot CLI** | Standard Copilot license | Local terminal | ❌ | ✅ Implemented |
+| **v2: Copilot SDK** | `github-copilot-sdk` | Local app | ❌ | ✅ Implemented |
+| **v3: Hosted Agents** | SDK + Docker | Foundry cloud | ✅ | 🔲 Planned |
+| **v4: Multi-Agent** | Agent Framework + SDK | Foundry cloud | ✅ | 🔲 Planned |
 
-See [docs/surfaces/README.md](docs/surfaces/README.md) for a detailed comparison.
-
-## Quick Start
+## Quick Start (v1 — Copilot CLI)
 
 ```bash
-# 1. Deploy infrastructure
+# 1. Deploy Fabric infrastructure
 make infra-deploy
 
-# 2. Load Wide World Importers sample data into Fabric
+# 2. Load Wide World Importers sample data
 make load-data
 
-# 3. Start sub-agents and run the demo
-make demo
+# 3. Create a Fabric Data Agent in the portal, enable MCP
+#    Copy the MCP URL and add it to src/cli/mcp-config.json
+
+# 4. In Copilot CLI, ask:
+#    "Prepare an account plan for Tailspin Toys"
+```
+
+## Quick Start (v2 — Copilot SDK)
+
+```bash
+pip install -e ".[sdk]"
+
+# Set your Fabric MCP URL
+export FABRIC_MCP_URL="https://..."
+
+# Run programmatically
+python -m src.sdk.cli "Prepare an account plan for Tailspin Toys"
 ```
 
 ## Dataset
@@ -44,9 +57,8 @@ Uses **Wide World Importers** — Microsoft's sample database for a wholesale no
 ## Documentation
 
 - [Architecture Overview](docs/architecture.md)
-- [Choose Your Architecture](docs/surfaces/README.md)
-- [Security Model](docs/security-model.md)
 - [Setup Guide](docs/setup-guide.md)
+- [Security Model](docs/security-model.md)
 - [Cost Model](docs/costs.md)
 
 ## Contributing
