@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
 
 from src.agents.report_generator.generator import ReportData, generate_docx, generate_pptx
@@ -138,6 +139,57 @@ class TestGenerateDocx:
         doc = Document(str(out))
         full_text = "\n".join(p.text for p in doc.paragraphs)
         assert "Custom note here." in full_text
+
+    def test_docx_with_forecast_section(self, tmp_path: Path) -> None:
+        """DOCX includes forecast table and chart when forecast_data is provided."""
+        from src.agents.report_generator.generator import ForecastData, ForecastItem
+
+        forecast = ForecastData(
+            customer_name="Tailspin Toys",
+            current_fy_total=1_250_000,
+            projected_fy_total=1_400_000,
+            overall_growth_rate=0.12,
+            methodology="Trailing 12-month trend",
+            items=[
+                ForecastItem("Novelty Items", 450000, 0.12, 504000),
+                ForecastItem("Clothing", 320000, 0.12, 358400),
+                ForecastItem("Toys", 200000, 0.15, 230000),
+            ],
+        )
+
+        data = _make_report_data([], {})
+        data.forecast_data = forecast
+
+        out = tmp_path / "forecast_report.docx"
+        generate_docx(data, "account_plan.md", str(out))
+
+        assert out.exists()
+        doc = Document(str(out))
+
+        headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        assert "FY Quota Forecast" in headings
+
+        assert len(doc.tables) >= 1
+        forecast_table = doc.tables[-1]
+        assert "Novelty Items" in forecast_table.rows[1].cells[0].text
+
+        image_relationships = [rel for rel in doc.part.rels.values() if rel.reltype == RT.IMAGE]
+        assert image_relationships, "Expected at least one embedded chart image"
+
+    def test_docx_without_forecast(self, tmp_path: Path) -> None:
+        """DOCX still generates correctly without forecast_data."""
+        data = _make_report_data(
+            [{"deal_name": "Test Deal", "value": 100000, "stage": "Qualify", "close_date": "2026-08-01"}],
+            {"summary": "Test research", "articles": []},
+        )
+
+        out = tmp_path / "no_forecast.docx"
+        generate_docx(data, "account_plan.md", str(out))
+        assert out.exists()
+
+        doc = Document(str(out))
+        headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        assert "FY Quota Forecast" not in headings
 
 
 # ---------------------------------------------------------------------------

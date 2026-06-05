@@ -6,18 +6,18 @@
 
 ## Architecture
 
-Four sub-agents orchestrated by a pluggable front-end:
+This demo is scoped to **two delivery surfaces** that share the same WWI sales scenario and Fabric backend:
 
-1. **Fabric Data Agent** — NL→SQL/DAX/KQL queries over OneLake data (built-in MCP server)
-2. **Researcher Agent** — Web search for customer intelligence (custom MCP server)
-3. **SharePoint Agent** — Internal doc retrieval via Graph API (custom MCP server)
-4. **Report Generator** — Template-based DOCX/PPTX generation with citations
+1. **GitHub Copilot CLI (prototype)** — MCP-based developer surface
+   - `wwi-sales-data` for Fabric Data Agent queries
+   - `workiq` for M365 activity context (**mocked in the demo tenant**)
+   - `quota-forecast` skill for inline report output
+2. **M365 Copilot + Teams (production path)** — Azure AI Foundry agent published via Agent Application
+   - `FabricIQPreviewTool` for Fabric-backed NL→SQL
+   - `WorkIQPreviewTool` for M365 activity data in production
+   - Custom function tools for report generation and business actions
 
-Four consumption surfaces (all demonstrated, none "picked"):
-- GitHub Copilot (VS Code / CLI) via MCP
-- M365 Copilot via direct Agent Store publish
-- Copilot Studio via connected agent
-- Azure AI Foundry via Python SDK + M365 publish
+**Copilot Studio** and **M365 Direct Publish** are documented in `docs/surfaces/` but not implemented in this demo.
 
 ## Coding Standards
 
@@ -33,13 +33,14 @@ Four consumption surfaces (all demonstrated, none "picked"):
 
 | Directory | Purpose |
 |-----------|---------|
-| `src/agents/` | Sub-agent MCP servers and report generator |
-| `src/orchestrator/` | Azure AI Foundry orchestrator agent |
-| `src/cli/skills/` | Copilot CLI skill definitions |
+| `src/agents/` | Local MCP servers, demo mocks, and report generation helpers |
+| `src/orchestrator/` | Azure AI Foundry agent and tool wiring for the M365 / Teams surface |
+| `src/cli/` | Copilot CLI MCP config and skills for the prototype surface |
 | `infra/` | Bicep IaC (Fabric capacity, Key Vault, Entra app, Foundry) |
 | `fabric/` | Fabric Data Agent config, instructions, few-shot examples |
-| `demo/` | Sample data (WWI), SharePoint demo docs, demo scripts |
-| `docs/` | Architecture, security, setup, surfaces comparison |
+| `demo/` | Sample data (WWI) and demo assets |
+| `docs/` | Architecture, security, setup, and two-surface guidance |
+| `docs/surfaces/` | Reference-only documentation for additional surfaces |
 | `tests/` | Unit, integration, and eval tests |
 
 ## Important Notes
@@ -48,4 +49,5 @@ Four consumption surfaces (all demonstrated, none "picked"):
 - **Citations first-class** — every generated report must include source attribution.
 - **Fabric MCP is built-in** — use the Data Agent's native MCP server, not a custom wrapper.
 - **Auth split** — interactive for CLI, managed identity for Foundry, OIDC for CI, bot reg for M365.
+- **WorkIQ demo mode** — production targets WorkIQ / OBO flows; the demo tenant uses mock M365 activity data until provisioning is available.
 - **No customer data in repo** — all data is Wide World Importers (Microsoft sample).

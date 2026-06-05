@@ -1,359 +1,395 @@
-"""Azure AI Foundry orchestrator — creates a sales agent with Fabric + custom tools.
-
-This module registers a FabricTool for NL→SQL data queries and custom function
-stubs for web research, SharePoint search, and report generation.
-
-Usage:
-    from src.orchestrator.foundry_agent import create_sales_agent, run_query
-
-    agent, project_client = create_sales_agent()
-    answer = run_query(project_client, agent, "What were total sales last quarter?")
-"""
+"""Azure AI Foundry orchestrator built on the Azure AI Projects SDK."""
 
 from __future__ import annotations
 
 import json
-import time
+import re
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from azure.ai.agents.models import (
-    FabricTool,
-    FunctionTool,
-    MessageRole,
-    RunStatus,
-    ToolSet,
-)
 from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import (
+    FabricIQPreviewTool,
+    FunctionTool,
+    MCPTool,
+    PromptAgentDefinition,
+    WorkIQPreviewTool,
+)
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 
 from src.orchestrator.config import OrchestratorConfig
 
-# ---------------------------------------------------------------------------
-# Custom function definitions (tool schemas for the LLM)
-# ---------------------------------------------------------------------------
+AGENT_NAME = "WWISalesAgent"
+DEFAULT_REPORT_TEMPLATE = "account_plan.md"
+MAX_FUNCTION_CALL_ROUNDS = 8
 
-_CUSTOM_FUNCTIONS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "research_customer",
-            "description": (
-                "Search the web for recent news, financials, and competitive "
-                "intelligence about a customer or prospect."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "company_name": {
-                        "type": "string",
-                        "description": "Name of the company to research.",
-                    },
-                    "focus_areas": {
-                        "type": "string",
-                        "description": (
-                            "Comma-separated areas of interest "
-                            "(e.g. 'financials, competitors, recent news')."
-                        ),
-                    },
-                },
-                "required": ["company_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_sharepoint",
-            "description": (
-                "Search the organization's SharePoint sites for internal "
-                "documents, policies, presentations, and meeting notes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for SharePoint content.",
-                    },
-                    "site_filter": {
-                        "type": "string",
-                        "description": "Optional SharePoint site URL to scope the search.",
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_report",
-            "description": (
-                "Generate a formatted report document (DOCX or PPTX) from "
-                "provided content sections."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Report title.",
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["docx", "pptx"],
-                        "description": "Output format: 'docx' or 'pptx'.",
-                    },
-                    "sections": {
-                        "type": "string",
-                        "description": (
-                            "JSON-encoded list of section objects, each with "
-                            "'heading' and 'content' keys."
-                        ),
-                    },
-                },
-                "required": ["title", "format", "sections"],
-            },
-        },
-    },
-]
+AGENT_INSTRUCTIONS = """You are a sales analyst for Wide World Importers (WWI), a wholesale novelty goods company.
+
+Your capabilities:
+1. SALES DATA: Query the WWI data warehouse via Fabric IQ for sales transactions,
+   customers, products, geography, and employees. Write correct T-SQL for Fabric.
+2. ACTIVITY DATA: When WorkIQ is available, retrieve M365 activity signals
+   (emails, meetings, engagement) for customer context.
+3. QUOTA FORECAST: Generate FY quota projections based on trailing 12-month sales trends.
+4. REPORTS: Generate formatted DOCX reports with charts and citations.
+
+Guidelines:
+- Use markdown tables for multi-row results
+- Round currency to 2 decimal places
+- Include totals/averages where appropriate
+- Cite data sources
+- Proactively surface insights the user might not have asked for
+- When comparing time periods, show both absolute values and percentage change"""
+
+ToolDefinition = FabricIQPreviewTool | WorkIQPreviewTool | FunctionTool | MCPTool
+ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
-# ---------------------------------------------------------------------------
-# Custom function implementations (stubs)
-# ---------------------------------------------------------------------------
-
-
-def research_customer_func(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Search the web for customer/competitor intelligence.
-
-    TODO: Replace stub with real implementation using Bing Search API,
-    Tavily, or another search provider.
-    """
-    company = arguments.get("company_name", "Unknown")
-    focus = arguments.get("focus_areas", "general")
-    # TODO: Replace stubs with real implementations
+def mock_workiq_func(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return mock M365 activity data when WorkIQ is not available."""
+    customer = arguments.get("customer_name", "Unknown")
     return {
-        "company": company,
-        "focus_areas": focus,
-        "results": [
+        "customer": customer,
+        "source": "mock (WorkIQ not available on this tenant)",
+        "recent_activity": [
             {
-                "title": f"[Stub] Recent news about {company}",
-                "snippet": "This is a placeholder. Implement web search to get real results.",
-                "url": "https://example.com",
-            }
+                "type": "email",
+                "subject": f"Re: FY27 Planning - {customer}",
+                "date": "2026-05-28",
+                "participants": ["AE", "Champion"],
+            },
+            {
+                "type": "meeting",
+                "subject": f"QBR Prep - {customer}",
+                "date": "2026-05-15",
+                "duration_min": 60,
+            },
+            {
+                "type": "email",
+                "subject": f"Updated pricing proposal - {customer}",
+                "date": "2026-05-10",
+                "participants": ["AE", "Procurement"],
+            },
+            {
+                "type": "meeting",
+                "subject": f"Technical deep dive - {customer}",
+                "date": "2026-04-22",
+                "duration_min": 90,
+            },
         ],
-        "source": "stub — replace with real search provider",
+        "engagement_score": "High",
+        "last_contact": "2026-05-28",
     }
 
 
-def search_sharepoint_func(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Search SharePoint for internal documents.
-
-    TODO: Replace stub with real implementation using Microsoft Graph API
-    Search endpoint (/search/query).
-    """
-    query = arguments.get("query", "")
-    site_filter = arguments.get("site_filter", "")
-    # TODO: Replace stubs with real implementations
+def forecast_quota_func(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Generate FY quota forecast stub with structured data."""
+    customer = arguments.get("customer_name", "Unknown")
+    items = [
+        {
+            "category": "Novelty Items",
+            "current_fy_revenue": 450000,
+            "growth_rate": 0.12,
+            "projected_fy_revenue": 504000,
+        },
+        {
+            "category": "Clothing",
+            "current_fy_revenue": 320000,
+            "growth_rate": 0.12,
+            "projected_fy_revenue": 358400,
+        },
+        {
+            "category": "Computing Novelties",
+            "current_fy_revenue": 280000,
+            "growth_rate": 0.10,
+            "projected_fy_revenue": 308000,
+        },
+        {
+            "category": "Toys",
+            "current_fy_revenue": 200000,
+            "growth_rate": 0.15,
+            "projected_fy_revenue": 230000,
+        },
+    ]
     return {
-        "query": query,
-        "site_filter": site_filter,
-        "results": [
-            {
-                "title": f"[Stub] SharePoint result for '{query}'",
-                "snippet": "This is a placeholder. Implement Graph API search.",
-                "url": "https://contoso.sharepoint.com",
-            }
-        ],
-        "source": "stub — replace with Graph API /search/query",
+        "customer": customer,
+        "current_fy_total": sum(item["current_fy_revenue"] for item in items),
+        "projected_fy_total": sum(item["projected_fy_revenue"] for item in items),
+        "overall_growth_rate": 0.12,
+        "methodology": "Trailing 12-month sales trend with category-specific growth rates (demo data)",
+        "items": items,
     }
 
 
 def generate_report_func(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Generate a DOCX or PPTX report from provided sections.
+    """Generate a DOCX report using the real report generator."""
+    from src.agents.report_generator.generator import (
+        ForecastData,
+        ForecastItem,
+        ReportData,
+        generate_docx,
+    )
 
-    TODO: Replace stub with real implementation using python-docx
-    (for DOCX) or python-pptx (for PPTX).
-    """
-    title = arguments.get("title", "Untitled Report")
-    fmt = arguments.get("format", "docx")
-    sections_raw = arguments.get("sections", "[]")
+    title = arguments.get("title", "Sales Report")
+    customer = arguments.get("customer_name", "Unknown")
+    sections = arguments.get("sections", [])
+    forecast_raw = arguments.get("forecast_data")
 
-    try:
-        sections = json.loads(sections_raw) if isinstance(sections_raw, str) else sections_raw
-    except json.JSONDecodeError:
-        sections = []
+    forecast = None
+    if isinstance(forecast_raw, dict):
+        forecast = ForecastData(
+            customer_name=customer,
+            current_fy_total=forecast_raw.get("current_fy_total", 0),
+            projected_fy_total=forecast_raw.get("projected_fy_total", 0),
+            overall_growth_rate=forecast_raw.get("overall_growth_rate", 0),
+            methodology=forecast_raw.get("methodology", ""),
+            items=[ForecastItem(**item) for item in forecast_raw.get("items", [])],
+        )
 
-    # TODO: Replace stubs with real implementations
+    data = ReportData(
+        title=title,
+        customer_name=customer,
+        generated_at=datetime.now(),
+        pipeline_data=sections if isinstance(sections, list) else [],
+        forecast_data=forecast,
+    )
+
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / f"{_slugify_filename(title)}.docx"
+
+    generate_docx(data, DEFAULT_REPORT_TEMPLATE, str(output_path))
+
     return {
+        "status": "generated",
+        "file_path": str(output_path),
+        "format": "docx",
         "title": title,
-        "format": fmt,
-        "section_count": len(sections),
-        "file_path": f"/output/{title.replace(' ', '_').lower()}.{fmt}",
-        "source": "stub — replace with python-docx / python-pptx generation",
+        "has_forecast": forecast is not None,
+        "has_chart": forecast is not None,
     }
 
 
-# Map function names to implementations
-_FUNCTION_MAP: dict[str, Any] = {
-    "research_customer": research_customer_func,
-    "search_sharepoint": search_sharepoint_func,
-    "generate_report": generate_report_func,
-}
+def _slugify_filename(value: str) -> str:
+    """Convert a report title into a filesystem-safe stem."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip().lower()).strip("._")
+    return cleaned or "sales_report"
 
 
-# ---------------------------------------------------------------------------
-# Agent creation
-# ---------------------------------------------------------------------------
+def _build_function_tool(name: str, description: str, parameters: dict[str, Any]) -> FunctionTool:
+    """Create a strongly validated function tool definition."""
+    return FunctionTool(name=name, description=description, parameters=parameters, strict=True)
 
 
-def create_sales_agent(
-    config: OrchestratorConfig | None = None,
-) -> tuple[Any, AIProjectClient]:
-    """Create an Azure AI Foundry agent with FabricTool + custom functions.
+def _build_tools(config: OrchestratorConfig) -> tuple[list[ToolDefinition], dict[str, ToolHandler]]:
+    """Build the tool list and local function handlers for the prompt agent."""
+    tools: list[ToolDefinition] = [
+        FabricIQPreviewTool(
+            project_connection_id=config.fabric_iq_connection_id,
+            require_approval="never",
+        )
+    ]
+    handlers: dict[str, ToolHandler] = {
+        "forecast_quota": forecast_quota_func,
+        "generate_report": generate_report_func,
+    }
 
-    Args:
-        config: Orchestrator config. If None, loads from environment.
+    if config.workiq_connection_id:
+        tools.append(WorkIQPreviewTool(project_connection_id=config.workiq_connection_id))
+    else:
+        tools.append(
+            _build_function_tool(
+                name="get_account_activity",
+                description="Retrieve recent M365 activity signals for a customer account.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Customer or prospect account name.",
+                        }
+                    },
+                    "required": ["customer_name"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+        handlers["get_account_activity"] = mock_workiq_func
 
-    Returns:
-        Tuple of (agent, project_client).
-    """
+    tools.extend(
+        [
+            _build_function_tool(
+                name="forecast_quota",
+                description="Generate an FY quota projection for a named customer account.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Customer or prospect account name.",
+                        }
+                    },
+                    "required": ["customer_name"],
+                    "additionalProperties": False,
+                },
+            ),
+            _build_function_tool(
+                name="generate_report",
+                description="Generate a formatted DOCX sales report for a customer account.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Title for the generated report."},
+                        "customer_name": {
+                            "type": "string",
+                            "description": "Customer or prospect account name.",
+                        },
+                        "sections": {
+                            "type": "array",
+                            "description": "List of section dictionaries to include in the report.",
+                            "items": {"type": "object", "additionalProperties": True},
+                        },
+                        "forecast_data": {
+                            "type": "object",
+                            "description": "Optional quota forecast payload to render in the DOCX report.",
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": ["customer_name"],
+                    "additionalProperties": False,
+                },
+            ),
+        ]
+    )
+
+    return tools, handlers
+
+
+def _create_agent(project_client: AIProjectClient, config: OrchestratorConfig) -> Any:
+    """Create a new prompt agent version backed by the configured tools."""
+    tools, handlers = _build_tools(config)
+    agent = project_client.agents.create_version(
+        agent_name=AGENT_NAME,
+        definition=PromptAgentDefinition(
+            model=config.model_deployment_name,
+            instructions=AGENT_INSTRUCTIONS,
+            tools=tools,
+        ),
+    )
+    setattr(agent, "_local_function_handlers", handlers)
+    return agent
+
+
+def _get_or_create_agent(project_client: AIProjectClient, config: OrchestratorConfig) -> Any:
+    """Get the latest agent definition or create it if it does not exist yet."""
+    try:
+        agent = project_client.agents.get(AGENT_NAME)
+    except (HttpResponseError, ResourceNotFoundError):
+        return _create_agent(project_client, config)
+
+    _, handlers = _build_tools(config)
+    setattr(agent, "_local_function_handlers", handlers)
+    return agent
+
+
+def _item_value(item: Any, field: str, default: Any = None) -> Any:
+    """Read a field from either a pydantic model or a plain dict."""
+    if isinstance(item, dict):
+        return item.get(field, default)
+    return getattr(item, field, default)
+
+
+def _execute_local_functions(agent: Any, response: Any) -> list[dict[str, str]]:
+    """Execute any local function calls requested by the response."""
+    handlers: dict[str, ToolHandler] = getattr(agent, "_local_function_handlers", {})
+    tool_outputs: list[dict[str, str]] = []
+
+    for item in getattr(response, "output", []) or []:
+        if _item_value(item, "type") != "function_call":
+            continue
+
+        name = _item_value(item, "name", "")
+        raw_arguments = _item_value(item, "arguments", "{}")
+        call_id = _item_value(item, "call_id") or _item_value(item, "id")
+        handler = handlers.get(name)
+
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except json.JSONDecodeError:
+            arguments = {}
+
+        if handler is None:
+            result = {"error": f"Unknown function: {name}"}
+        else:
+            result = handler(arguments if isinstance(arguments, dict) else {})
+
+        if call_id:
+            tool_outputs.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": str(call_id),
+                    "output": json.dumps(result, default=str),
+                }
+            )
+
+    return tool_outputs
+
+
+def _extract_output_text(response: Any) -> str:
+    """Return the text content from a responses API payload."""
+    output_text = getattr(response, "output_text", "")
+    if output_text:
+        return output_text
+
+    chunks: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        if _item_value(item, "type") != "message":
+            continue
+        for content in _item_value(item, "content", []) or []:
+            text = _item_value(content, "text")
+            if isinstance(text, str):
+                chunks.append(text)
+                continue
+            text_value = _item_value(text, "value")
+            if isinstance(text_value, str):
+                chunks.append(text_value)
+
+    return "\n".join(chunk for chunk in chunks if chunk) or "(no response text returned)"
+
+
+def run_query(question: str, config: OrchestratorConfig | None = None) -> str:
+    """Send a question to the agent and return the response."""
     if config is None:
         config = OrchestratorConfig.from_env()
 
     credential = DefaultAzureCredential()
-    project_client = AIProjectClient.from_connection_string(
-        conn_str=config.foundry_project_connection,
+    project_client = AIProjectClient(
+        endpoint=config.foundry_project_endpoint,
         credential=credential,
+        allow_preview=True,
+    )
+    openai_client = project_client.get_openai_client()
+
+    agent = _get_or_create_agent(project_client, config)
+    extra_body = {"agent_reference": {"name": agent.name, "type": "agent_reference"}}
+
+    response = openai_client.responses.create(
+        input=question,
+        extra_body=extra_body,
     )
 
-    # Fabric Data Agent tool (NL→SQL)
-    fabric_tool = FabricTool(fabric_connection_id=config.fabric_connection_id)
-
-    # Custom function tools (web research, SharePoint, reports)
-    function_tool = FunctionTool(functions=_CUSTOM_FUNCTIONS)
-
-    toolset = ToolSet()
-    toolset.add(fabric_tool)
-    toolset.add(function_tool)
-
-    agent = project_client.agents.create_agent(
-        model=config.model_deployment_name,
-        name="WWI Sales Agent",
-        instructions=(
-            "You are a sales analyst for Wide World Importers. "
-            "Use the Fabric data tool to answer questions about sales, "
-            "customers, and inventory. Use research_customer for web-based "
-            "competitive intelligence. Use search_sharepoint for internal "
-            "documents. Use generate_report to create formatted deliverables. "
-            "Always cite your data sources."
-        ),
-        toolset=toolset,
-    )
-
-    return agent, project_client
-
-
-# ---------------------------------------------------------------------------
-# Query execution
-# ---------------------------------------------------------------------------
-
-
-def run_query(
-    project_client: AIProjectClient,
-    agent: Any,
-    question: str,
-    *,
-    poll_interval: float = 1.0,
-    max_wait: float = 120.0,
-) -> str:
-    """Send a question to the agent and return the final answer.
-
-    Creates a new thread, posts the user message, runs the agent,
-    polls for completion, and returns the assistant's response text.
-
-    Args:
-        project_client: Authenticated Foundry project client.
-        agent: The created agent object.
-        question: User's natural-language question.
-        poll_interval: Seconds between polling attempts.
-        max_wait: Maximum seconds to wait for completion.
-
-    Returns:
-        The assistant's response text.
-
-    Raises:
-        TimeoutError: If the run doesn't complete within max_wait.
-        RuntimeError: If the run fails.
-    """
-    thread = project_client.agents.threads.create()
-
-    project_client.agents.messages.create(
-        thread_id=thread.id,
-        role=MessageRole.USER,
-        content=question,
-    )
-
-    run = project_client.agents.runs.create(
-        thread_id=thread.id,
-        agent_id=agent.id,
-    )
-
-    # Poll for completion
-    elapsed = 0.0
-    while elapsed < max_wait:
-        run = project_client.agents.runs.get(thread_id=thread.id, run_id=run.id)
-
-        if run.status == RunStatus.COMPLETED:
+    for _ in range(MAX_FUNCTION_CALL_ROUNDS):
+        tool_outputs = _execute_local_functions(agent, response)
+        if not tool_outputs:
             break
-        if run.status in (RunStatus.FAILED, RunStatus.CANCELLED):
-            raise RuntimeError(f"Agent run {run.status}: {getattr(run, 'last_error', 'unknown')}")
-        if run.status == RunStatus.REQUIRES_ACTION:
-            _handle_tool_calls(project_client, thread.id, run)
 
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-    else:
-        raise TimeoutError(f"Agent run did not complete within {max_wait}s")
-
-    # Retrieve assistant messages
-    messages = project_client.agents.messages.list(thread_id=thread.id)
-    for msg in reversed(messages.data):
-        if msg.role == MessageRole.ASSISTANT:
-            return msg.content[0].text.value if msg.content else "(no response)"
-
-    return "(no assistant response found)"
-
-
-def _handle_tool_calls(
-    project_client: AIProjectClient,
-    thread_id: str,
-    run: Any,
-) -> None:
-    """Process required tool calls by dispatching to local function stubs."""
-    tool_calls = run.required_action.submit_tool_outputs.tool_calls
-    tool_outputs = []
-
-    for call in tool_calls:
-        func_name = call.function.name
-        func_args = json.loads(call.function.arguments)
-
-        handler = _FUNCTION_MAP.get(func_name)
-        if handler:
-            result = handler(func_args)
-        else:
-            result = {"error": f"Unknown function: {func_name}"}
-
-        tool_outputs.append(
-            {
-                "tool_call_id": call.id,
-                "output": json.dumps(result),
-            }
+        response = openai_client.responses.create(
+            input=tool_outputs,
+            previous_response_id=response.id,
+            extra_body=extra_body,
         )
 
-    project_client.agents.runs.submit_tool_outputs(
-        thread_id=thread_id,
-        run_id=run.id,
-        tool_outputs=tool_outputs,
-    )
+    return _extract_output_text(response)
