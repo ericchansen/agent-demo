@@ -1,0 +1,16 @@
+.features {
+  display: flex;
+  align-items: center;
+  padding: 2rem 0 4rem;
+  width: 100%;
+}
+
+.featureCard {
+  height: 100%;
+}
+
+.featureSvg {
+  height: 160px;
+  margin-bottom: 1rem;
+  width: 160px;
+}

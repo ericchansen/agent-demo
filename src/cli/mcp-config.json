@@ -30,6 +30,12 @@
       "args": ["-m", "src.agents.sharepoint.mcp_server"],
       "type": "stdio",
       "description": "Search and retrieve internal SharePoint documents"
+    },
+    "report-generator": {
+      "command": "python",
+      "args": ["-m", "src.agents.report_generator.mcp_server"],
+      "type": "stdio",
+      "description": "Generate DOCX/PPTX sales reports with charts and citations"
     }
   }
 }

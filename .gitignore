@@ -50,3 +50,7 @@ docs/diagrams/*.png
 # Temporary
 *.tmp
 *.bak
+
+website/node_modules/
+website/.docusaurus/
+website/build/

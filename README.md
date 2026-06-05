@@ -1,57 +1,65 @@
 # Fabric Sales Agent Accelerator
 
-An open-source reference implementation showing how to combine **Microsoft Fabric Data Agent** with agentic AI workflows — a Researcher Agent (web), a SharePoint Agent (internal docs), and a Report Generator — surfaced through **multiple architecture options**.
+> 📖 **[Full documentation](https://ericchansen.github.io/agent-demo/)** — architecture, demo script, setup guide, costs
 
-> **Choose Your Architecture:** This repo demonstrates four consumption surfaces — pick the one that fits your team.
+## What it is
 
-## What It Does
+An AI sales agent accelerator for **Wide World Importers** that shows how to pair a shared **Microsoft Fabric Data Agent** backend with two delivery surfaces: a fast developer prototype in GitHub Copilot CLI and a production path into **M365 Copilot + Teams**.
 
-A sales user asks a natural language question like *"Prepare an account plan for Tailspin Toys"* and the system:
+## The Two-Surface Approach
 
-1. **Queries pipeline data** from Fabric OneLake via the Fabric Data Agent
-2. **Researches the customer** on the open web (news, earnings, strategy)
-3. **Pulls internal context** from SharePoint (prior proposals, playbooks)
-4. **Generates a deliverable** (DOCX or PPTX) from templates with full source citations
+- **Surface 1: GitHub Copilot CLI** — prototype quickly with MCP servers for Fabric data, M365 activity context, and inline report generation.
+- **Surface 2: M365 Copilot + Teams** — graduate the same business flow into an Azure AI Foundry agent published through an Agent Application.
+- **WorkIQ note:** production uses WorkIQ for M365 activity context; the demo tenant uses a mock WorkIQ tool with sample activity data until tenant provisioning is available.
 
-## Architecture Options
+## Architecture diagram
 
-| Surface | Audience | Effort | Capabilities |
-|---------|----------|--------|-------------|
-| **GitHub Copilot (VS Code / CLI)** | Developers, power users | MCP config + skills | Full multi-agent workflow |
-| **M365 Copilot (Direct)** | Business users | Zero code | Fabric data queries only |
-| **Copilot Studio** | Business users | Low-code | Multi-source with connectors |
-| **Azure AI Foundry** | Pro developers | Python SDK | Full orchestration + M365 publish |
+```text
+┌─ CLI Surface (Prototype) ─────────────────────┐
+│ Copilot CLI → MCP Servers                      │
+│   → wwi-sales-data (Fabric Data Agent)         │
+│   → workiq (M365 activity data)                │
+│   → quota-forecast skill (inline report)       │
+└────────────────────────────────────────────────┘
 
-See [docs/surfaces/README.md](docs/surfaces/README.md) for a detailed comparison.
+┌─ M365 Surface (Production) ───────────────────┐
+│ M365 Copilot / Teams → Foundry Agent           │
+│   → Fabric IQ (NL→SQL platform tool)           │
+│   → WorkIQ (M365 activity platform tool, OBO)  │
+│   → Report Generator (DOCX + OneDrive link)    │
+└────────────────────────────────────────────────┘
+
+Same Data Agent backend. Same business logic. Different distribution.
+```
 
 ## Quick Start
 
-```bash
-# 1. Deploy infrastructure
-make infra-deploy
+Start with the [setup guide](docs/setup-guide.md) for infrastructure, Fabric Data Agent configuration, and CLI wiring.
 
-# 2. Load Wide World Importers sample data into Fabric
-make load-data
+## Tech Stack
 
-# 3. Start sub-agents and run the demo
-make demo
-```
+- **Microsoft Fabric** — shared data agent and OneLake analytics
+- **Azure AI Foundry** — production agent for M365 Copilot and Teams
+- **Model Context Protocol (MCP)** — tool surface for the CLI prototype
+- **Python 3.11+** — agent, tool, and report-generation implementation
 
-## Dataset
+## Cost
 
-Uses **Wide World Importers** — Microsoft's sample database for a wholesale novelty goods distributor. No customer-specific data. See [demo/](demo/) for details.
+Plan for roughly **~$270/month active** for the demo footprint. Pause Fabric capacity when idle to drop to roughly **~$15/month** in residual costs. See [docs/costs.md](docs/costs.md).
 
-## Documentation
+## Repository Structure
 
-- [Architecture Overview](docs/architecture.md)
-- [Choose Your Architecture](docs/surfaces/README.md)
-- [Security Model](docs/security-model.md)
-- [Setup Guide](docs/setup-guide.md)
-- [Cost Model](docs/costs.md)
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+| Path | Purpose |
+|------|---------|
+| `src/cli/` | GitHub Copilot CLI prototype surface: MCP config and skills |
+| `src/orchestrator/` | Azure AI Foundry agent for the M365 Copilot + Teams surface |
+| `src/agents/` | Local MCP servers, demo mocks, and report generation helpers |
+| `fabric/` | Fabric Data Agent instructions and example queries |
+| `infra/` | Bicep infrastructure for Fabric and Azure resources |
+| `demo/` | Wide World Importers sample assets and demo content |
+| `docs/` | Setup, architecture, cost, and two-surface guidance |
+| `docs/surfaces/` | Reference-only alternatives such as Copilot Studio and M365 Direct Publish |
+| `tests/` | Unit and integration coverage |
 
 ## License
 
