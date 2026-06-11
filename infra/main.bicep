@@ -37,9 +37,6 @@ param foundryHubCogServicesName string
 @description('Name of the AI Foundry Hub workspace (fabric-agent-hub).')
 param foundryHubName string
 
-@description('Name of the AI Foundry Project inside the hub (fsa-project).')
-param foundryProjectName string
-
 @description('Resource tags applied to every resource.')
 param tags object = {}
 
@@ -92,15 +89,10 @@ module foundryHubCogServices './modules/cognitive-services.bicep' = {
   }
 }
 
-// ⚠️  PREREQUISITE: Assign "Storage Blob Data Contributor" to the hub's
-// system-assigned MI on the storage account before deploying this module
-// when migrating an existing hub from accesskey → identity auth mode.
-// See infra/modules/ai-foundry.bicep for the full manual-step instructions.
 module aiFoundry './modules/ai-foundry.bicep' = {
   name: 'aiFoundry'
   params: {
     hubName: foundryHubName
-    projectName: foundryProjectName
     location: location
     keyVaultId: keyVault.outputs.keyVaultId
     storageAccountId: storage.outputs.storageAccountId
