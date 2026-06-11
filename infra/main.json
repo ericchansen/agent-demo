@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "13342880531995803646"
+      "templateHash": "13489497723397159688"
     }
   },
   "parameters": {
@@ -83,12 +83,6 @@
       "type": "string",
       "metadata": {
         "description": "Name of the AI Foundry Hub workspace (fabric-agent-hub)."
-      }
-    },
-    "foundryProjectName": {
-      "type": "string",
-      "metadata": {
-        "description": "Name of the AI Foundry Project inside the hub (fsa-project)."
       }
     },
     "tags": {
@@ -657,9 +651,6 @@
           "hubName": {
             "value": "[parameters('foundryHubName')]"
           },
-          "projectName": {
-            "value": "[parameters('foundryProjectName')]"
-          },
           "location": {
             "value": "[parameters('location')]"
           },
@@ -680,7 +671,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "1896146898294228260"
+              "templateHash": "11701199558766968155"
             }
           },
           "parameters": {
@@ -688,12 +679,6 @@
               "type": "string",
               "metadata": {
                 "description": "Name of the AI Foundry Hub (MachineLearningServices workspace)."
-              }
-            },
-            "projectName": {
-              "type": "string",
-              "metadata": {
-                "description": "Name of the AI Foundry Project inside the hub."
               }
             },
             "location": {
@@ -722,6 +707,9 @@
               }
             }
           },
+          "variables": {
+            "storageBlobDataContributorRoleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+          },
           "resources": [
             {
               "type": "Microsoft.MachineLearningServices/workspaces",
@@ -741,19 +729,14 @@
               }
             },
             {
-              "type": "Microsoft.MachineLearningServices/workspaces",
-              "apiVersion": "2024-04-01",
-              "name": "[parameters('projectName')]",
-              "location": "[parameters('location')]",
-              "tags": "[parameters('tags')]",
-              "kind": "Project",
-              "identity": {
-                "type": "SystemAssigned"
-              },
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', last(split(parameters('storageAccountId'), '/')))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', last(split(parameters('storageAccountId'), '/'))), resourceId('Microsoft.MachineLearningServices/workspaces', parameters('hubName')), variables('storageBlobDataContributorRoleId'))]",
               "properties": {
-                "hubResourceId": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('hubName'))]",
-                "publicNetworkAccess": "Disabled",
-                "systemDatastoresAuthMode": "identity"
+                "principalId": "[reference(resourceId('Microsoft.MachineLearningServices/workspaces', parameters('hubName')), '2024-04-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('storageBlobDataContributorRoleId'))]"
               },
               "dependsOn": [
                 "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('hubName'))]"
@@ -774,13 +757,6 @@
                 "description": "Principal ID of the hub system-assigned managed identity."
               },
               "value": "[reference(resourceId('Microsoft.MachineLearningServices/workspaces', parameters('hubName')), '2024-04-01', 'full').identity.principalId]"
-            },
-            "projectId": {
-              "type": "string",
-              "metadata": {
-                "description": "Resource ID of the Foundry Project."
-              },
-              "value": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('projectName'))]"
             }
           }
         }
@@ -806,7 +782,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "4211146240879941899"
+              "templateHash": "13924865904746257965"
             }
           },
           "resources": [
@@ -815,9 +791,9 @@
               "apiVersion": "2023-04-01",
               "name": "fsa-storage-no-sharedkey",
               "properties": {
-                "displayName": "[FSA] Storage — disable shared-key access",
+                "displayName": "[FSA] Storage — prevent shared-key access",
                 "description": "Audit storage accounts that still allow shared-key (access-key) authentication. Entra identity-based auth should be used exclusively.",
-                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/b2982f36-99f2-4db5-8eff-283140c09693",
+                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/8c6a50c6-9ffd-4ae7-986f-5fa6111f9a54",
                 "parameters": {
                   "effect": {
                     "value": "Audit"
@@ -829,11 +805,11 @@
             {
               "type": "Microsoft.Authorization/policyAssignments",
               "apiVersion": "2023-04-01",
-              "name": "fsa-cogsvc-no-localauth",
+              "name": "fsa-aisvc-no-localauth",
               "properties": {
-                "displayName": "[FSA] Cognitive Services — disable local auth",
-                "description": "Audit Cognitive Services accounts that allow API-key (local) authentication. Entra token-based auth should be used exclusively.",
-                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/71ef260a-8f18-47b7-abcae-2e13a3a99b5f",
+                "displayName": "[FSA] AI Services — disable local key access",
+                "description": "Audit Azure AI Services / Cognitive Services accounts that allow API-key (local) authentication. Entra token-based auth should be used exclusively.",
+                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/71ef260a-8f18-47b7-abcb-62d0673d94dc",
                 "parameters": {
                   "effect": {
                     "value": "Audit"
@@ -849,7 +825,23 @@
               "properties": {
                 "displayName": "[FSA] AI Foundry Hub — disable public network access",
                 "description": "Audit Azure Machine Learning workspaces (Foundry hubs/projects) that allow public network access.",
-                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/a6fb4358-5bf4-4ad7-ba82-2cd2f41ce5e8",
+                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/438c38d2-3772-465a-a9cc-7a6666a275ce",
+                "parameters": {
+                  "effect": {
+                    "value": "Audit"
+                  }
+                },
+                "enforcementMode": "Default"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/policyAssignments",
+              "apiVersion": "2023-04-01",
+              "name": "fsa-aisvc-restrict-net",
+              "properties": {
+                "displayName": "[FSA] AI Services — restrict network access",
+                "description": "Audit Azure AI Services / Cognitive Services accounts that do not restrict public network access.",
+                "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/037eea7a-bd0a-46c5-9a66-03aea78705d3",
                 "parameters": {
                   "effect": {
                     "value": "Audit"
