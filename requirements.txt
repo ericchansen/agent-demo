@@ -1,5 +1,5 @@
 aiohttp >= 3.9
-azure-ai-projects >= 2.2.0
+azure-ai-projects >= 2.7.0
 azure-identity >= 1.17
 matplotlib >= 3.8
 mcp >= 1.0
