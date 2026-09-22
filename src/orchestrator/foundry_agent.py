@@ -453,8 +453,7 @@ def _build_tools(config: OrchestratorConfig) -> tuple[list[ToolDefinition], dict
         FabricIQPreviewTool(
             project_connection_id=config.fabric_iq_connection_id,
             require_approval="never",
-            name="wwi_sales_data",
-            description="Query Wide World Importers sales data warehouse via Fabric Data Agent",
+            server_label="wwi_sales_data",
         )
     ]
     handlers: dict[str, ToolHandler] = {
@@ -470,11 +469,7 @@ def _build_tools(config: OrchestratorConfig) -> tuple[list[ToolDefinition], dict
             FabricIQPreviewTool(
                 project_connection_id=config.market_data_connection_id,
                 require_approval="never",
-                name="real_world_market_data",
-                description=(
-                    "Query SEC EDGAR financial data for real US public companies — "
-                    "revenue, net income, total assets from 10-K/10-Q filings"
-                ),
+                server_label="real_world_market_data",
             )
         )
 

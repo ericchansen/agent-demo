@@ -339,6 +339,44 @@ def test_config_loads_from_env() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("market_data_connection_id", [None, "/test/market-connection"])
+def test_build_tools_serializes_fabric_connections(market_data_connection_id: str | None) -> None:
+    from src.orchestrator.config import OrchestratorConfig
+    from src.orchestrator.foundry_agent import _build_agent_instructions, _build_tools
+
+    config = OrchestratorConfig(
+        foundry_project_endpoint="https://test.ai.azure.com/",
+        model_deployment_name="test-model",
+        fabric_iq_connection_id="/test/wwi-connection",
+        market_data_connection_id=market_data_connection_id,
+    )
+
+    tools, _ = _build_tools(config)
+    fabric_tools = [tool.as_dict() for tool in tools if tool.type == "fabric_iq_preview"]
+    expected = [
+        {
+            "type": "fabric_iq_preview",
+            "project_connection_id": "/test/wwi-connection",
+            "require_approval": "never",
+            "server_label": "wwi_sales_data",
+        }
+    ]
+    if market_data_connection_id:
+        expected.append(
+            {
+                "type": "fabric_iq_preview",
+                "project_connection_id": market_data_connection_id,
+                "require_approval": "never",
+                "server_label": "real_world_market_data",
+            }
+        )
+
+    assert fabric_tools == expected
+    instructions = _build_agent_instructions(config)
+    assert "WWI data warehouse" in instructions
+    assert ("SEC EDGAR financial data" in instructions) == bool(market_data_connection_id)
+
+
 def test_build_tools_without_workiq() -> None:
     """Tools list excludes WorkIQ when not configured."""
     module = _load_module("src.orchestrator.foundry_agent")
