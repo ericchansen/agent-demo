@@ -8,13 +8,9 @@ from typing import Any
 
 import mcp.server.stdio
 import mcp.types as types
-from mcp.server import Server
-from mcp.server.lowlevel import NotificationOptions
-from mcp.server.models import InitializationOptions
+from mcp.server import Server, ServerRequestContext
 
 from src.agents.researcher.tools import research_company
-
-server = Server("researcher-agent")
 
 # ---------------------------------------------------------------------------
 # Tool registry
@@ -26,7 +22,7 @@ _RESEARCH_TOOL = types.Tool(
         "Research a company on the open web. Returns a summary, recent articles, "
         "and key metrics sourced from news and financial data."
     ),
-    inputSchema={
+    input_schema={
         "type": "object",
         "properties": {
             "company_name": {
@@ -43,14 +39,12 @@ _RESEARCH_TOOL = types.Tool(
 )
 
 
-@server.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
 async def handle_list_tools() -> list[types.Tool]:
     """Advertise available tools."""
     return [_RESEARCH_TOOL]
 
 
-@server.call_tool()  # type: ignore[untyped-decorator]
-async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.ContentBlock]:
     """Dispatch tool calls."""
     if name == "research_company":
         result = await research_company(
@@ -62,6 +56,28 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
     raise ValueError(f"Unknown tool: {name}")
 
 
+async def _list_tools_handler(
+    _context: ServerRequestContext[Any],
+    _params: types.PaginatedRequestParams | None,
+) -> types.ListToolsResult:
+    return types.ListToolsResult(tools=await handle_list_tools())
+
+
+async def _call_tool_handler(
+    _context: ServerRequestContext[Any],
+    params: types.CallToolRequestParams,
+) -> types.CallToolResult:
+    return types.CallToolResult(content=await handle_call_tool(params.name, params.arguments or {}))
+
+
+server = Server(
+    "researcher-agent",
+    version="0.1.0",
+    on_list_tools=_list_tools_handler,
+    on_call_tool=_call_tool_handler,
+)
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -70,18 +86,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
 async def main() -> None:
     """Run the Researcher MCP server over stdio."""
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="researcher-agent",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 if __name__ == "__main__":
