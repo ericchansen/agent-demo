@@ -8,19 +8,24 @@ import re
 from pathlib import Path
 from typing import Any
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ContentBlock,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
 from src.agents.report_generator.generator import _build_report_data, generate_docx, generate_pptx
 
 _DOCX_TEMPLATE = "account_plan.md"
 _PPTX_TEMPLATE = "qbr_deck.md"
 
-server = Server("report-generator")
 
-
-@server.list_tools()  # type: ignore[untyped-decorator,no-untyped-call]
 async def list_tools() -> list[Tool]:
     """Advertise available report generation tools."""
     return [
@@ -31,7 +36,7 @@ async def list_tools() -> list[Tool]:
                 "Provide a title, customer name, and data sections. "
                 "Returns the file path of the generated report."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Report title"},
@@ -68,8 +73,7 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()  # type: ignore[untyped-decorator]
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[ContentBlock]:
     """Dispatch MCP tool calls to the report generator."""
     if name != "generate_report":
         raise ValueError(f"Unknown tool: {name}")
@@ -109,6 +113,27 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             ),
         )
     ]
+
+
+async def _handle_list_tools(
+    _context: ServerRequestContext[Any],
+    _params: PaginatedRequestParams | None,
+) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _handle_call_tool(
+    _context: ServerRequestContext[Any],
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    return CallToolResult(content=await call_tool(params.name, params.arguments or {}))
+
+
+server = Server(
+    "report-generator",
+    on_list_tools=_handle_list_tools,
+    on_call_tool=_handle_call_tool,
+)
 
 
 def _slugify_filename(value: str) -> str:

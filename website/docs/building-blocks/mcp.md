@@ -65,33 +65,49 @@ The Fabric Data Agent uses HTTP (it's a cloud service). WorkIQ uses stdio via np
 If you want to add a new tool to the agent, you write an MCP server. The simplest approach:
 
 ```python
-# Example: a minimal MCP server using the Python SDK
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+# Example: a minimal MCP Python SDK v2 server
+from typing import Any
 
-server = Server("my-tool")
+from mcp.server import Server, ServerRequestContext
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
+
+LOOKUP_CUSTOMER = Tool(
+    name="lookup_customer",
+    description="Look up customer information by name",
+    input_schema={
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Customer name"}},
+        "required": ["name"],
+    },
+)
 
 
-@server.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="lookup_customer",
-            description="Look up customer information by name",
-            inputSchema={
-                "type": "object",
-                "properties": {"name": {"type": "string", "description": "Customer name"}},
-                "required": ["name"],
-            },
-        )
-    ]
+async def list_tools(
+    _context: ServerRequestContext[Any],
+    _params: PaginatedRequestParams | None,
+) -> ListToolsResult:
+    return ListToolsResult(tools=[LOOKUP_CUSTOMER])
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    if name == "lookup_customer":
-        # Your logic here
-        return [TextContent(type="text", text=f"Customer: {arguments['name']}")]
+async def call_tool(
+    _context: ServerRequestContext[Any],
+    params: CallToolRequestParams,
+) -> CallToolResult:
+    if params.name != "lookup_customer":
+        raise ValueError(f"Unknown tool: {params.name}")
+
+    arguments = params.arguments or {}
+    return CallToolResult(content=[TextContent(type="text", text=f"Customer: {arguments['name']}")])
+
+
+server = Server("my-tool", on_list_tools=list_tools, on_call_tool=call_tool)
 ```
 
 > 📖 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) · [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) · [Building MCP servers](https://modelcontextprotocol.io/docs/guides/building-servers)
