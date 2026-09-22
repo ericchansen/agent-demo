@@ -536,44 +536,55 @@ def test_run_query_uses_mocked_clients() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_rejects_invalid_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """MCP server rejects unsupported report formats or falls back safely."""
+    """MCP server rejects unsupported report formats before creating output."""
+    from mcp.types import CallToolRequestParams
+
     report_mcp = _load_module("src.agents.report_generator.mcp_server")
     monkeypatch.chdir(tmp_path)
 
     with patch.object(report_mcp, "generate_docx", side_effect=_stub_generate_file):
         result = await report_mcp.call_tool(
-            "generate_report",
-            {
-                "title": "Test",
-                "customer_name": "Test",
-                "format": "pdf",
-            },
+            MagicMock(),
+            CallToolRequestParams(
+                name="generate_report",
+                arguments={
+                    "title": "Test",
+                    "customer_name": "Test",
+                    "format": "pdf",
+                },
+            ),
         )
 
-    assert len(result) == 1
-    response = json.loads(result[0].text)
-    assert "error" in response, f"Expected error for unsupported format 'pdf', got: {response}"
-    assert "format" in response["error"].lower() or "unsupported" in response["error"].lower()
+    assert result.is_error is True
+    assert len(result.content) == 1
+    assert "Input validation error:" in result.content[0].text
+    assert not (tmp_path / "output").exists()
 
 
 @pytest.mark.asyncio
 async def test_mcp_generates_docx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """MCP server generates DOCX successfully."""
+    from mcp.types import CallToolRequestParams
+
     report_mcp = _load_module("src.agents.report_generator.mcp_server")
     monkeypatch.chdir(tmp_path)
 
     with patch.object(report_mcp, "generate_docx", side_effect=_stub_generate_file):
         result = await report_mcp.call_tool(
-            "generate_report",
-            {
-                "title": "MCP Test Report",
-                "customer_name": "Contoso",
-                "format": "docx",
-            },
+            MagicMock(),
+            CallToolRequestParams(
+                name="generate_report",
+                arguments={
+                    "title": "MCP Test Report",
+                    "customer_name": "Contoso",
+                    "format": "docx",
+                },
+            ),
         )
 
-    assert len(result) == 1
-    response = json.loads(result[0].text)
+    assert result.is_error is False
+    assert len(result.content) == 1
+    response = json.loads(result.content[0].text)
     assert response.get("status") == "success"
     assert response.get("format") == "docx"
     assert Path(response["file_path"]).exists()

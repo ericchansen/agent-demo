@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-from typing import Any
 
-from mcp.server import Server
+from aiohttp import ClientError
+from azure.core.exceptions import AzureError
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams, TextContent, Tool
 
-from src.agents.sharepoint.tools import get_document_content, search_documents
+from src.agents.mcp_validation import tool_error, validate_tool_arguments
+from src.agents.sharepoint.tools import DocumentContentError, get_document_content, search_documents
 
 logger = logging.getLogger(__name__)
 
@@ -19,76 +22,85 @@ logger = logging.getLogger(__name__)
 # Server setup
 # ---------------------------------------------------------------------------
 
-server = Server("sharepoint-agent")
 
-
-@server.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
-async def list_tools() -> list[Tool]:
+async def list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
     """Advertise available tools to the MCP client."""
-    return [
-        Tool(
-            name="search_documents",
-            description=(
-                "Search SharePoint for documents matching a query string. "
-                "Returns a list of matching documents with name, URL, excerpt, and last-modified date."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Free-text search query to find documents.",
+    return ListToolsResult(
+        tools=[
+            Tool(
+                name="search_documents",
+                description=(
+                    "Search SharePoint for documents matching a query string. "
+                    "Returns a list of matching documents with name, URL, excerpt, and last-modified date."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Free-text search query to find documents.",
+                        },
+                        "site_id": {
+                            "type": "string",
+                            "description": "Optional SharePoint site ID to scope the search.",
+                        },
                     },
-                    "site_id": {
-                        "type": "string",
-                        "description": "Optional SharePoint site ID to scope the search.",
-                    },
+                    "required": ["query"],
                 },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="get_document_content",
-            description=(
-                "Retrieve the full text content of a specific SharePoint document "
-                "identified by its drive ID and item ID."
             ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "drive_id": {
-                        "type": "string",
-                        "description": "The OneDrive/SharePoint drive ID containing the document.",
+            Tool(
+                name="get_document_content",
+                description=(
+                    "Retrieve the full text content of a specific SharePoint document "
+                    "identified by its drive ID and item ID."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "drive_id": {
+                            "type": "string",
+                            "description": "The OneDrive/SharePoint drive ID containing the document.",
+                        },
+                        "item_id": {
+                            "type": "string",
+                            "description": "The unique item ID of the document within the drive.",
+                        },
                     },
-                    "item_id": {
-                        "type": "string",
-                        "description": "The unique item ID of the document within the drive.",
-                    },
+                    "required": ["drive_id", "item_id"],
                 },
-                "required": ["drive_id", "item_id"],
-            },
-        ),
-    ]
+            ),
+        ]
+    )
 
 
-@server.call_tool()  # type: ignore[untyped-decorator]
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
     """Dispatch MCP tool calls to the appropriate handler."""
-    import json  # noqa: PLC0415
+    tools = (await list_tools(ctx, None)).tools
+    tool = next((tool for tool in tools if tool.name == params.name), None)
+    if tool is None:
+        return tool_error(f"Unknown tool: {params.name}")
 
-    if name == "search_documents":
-        query: str = arguments["query"]
-        site_id: str | None = arguments.get("site_id")
-        results = await search_documents(query, site_id=site_id)
-        return [TextContent(type="text", text=json.dumps(results, indent=2))]
+    arguments = params.arguments or {}
+    if error := validate_tool_arguments(tool, arguments):
+        return error
 
-    if name == "get_document_content":
-        drive_id: str = arguments["drive_id"]
-        item_id: str = arguments["item_id"]
-        result = await get_document_content(drive_id, item_id)
-        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    try:
+        if params.name == "search_documents":
+            results = await search_documents(arguments["query"], site_id=arguments.get("site_id"))
+            content = json.dumps(results, indent=2)
+        else:
+            result = await get_document_content(arguments["drive_id"], arguments["item_id"])
+            content = json.dumps(result, indent=2)
+    except (
+        AzureError,
+        ClientError,
+        TimeoutError,
+        json.JSONDecodeError,
+        DocumentContentError,
+    ) as exc:
+        return tool_error(str(exc))
 
-    raise ValueError(f"Unknown tool: {name}")
+    return CallToolResult(content=[TextContent(type="text", text=content)], is_error=False)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +115,9 @@ async def main() -> None:
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+server = Server("sharepoint-agent", on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 if __name__ == "__main__":

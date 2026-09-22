@@ -23,6 +23,10 @@ cd /path/to/fabric-sales-agent-accelerator-scaffold
 pip install -e ".[dev]"
 ```
 
+The local servers require MCP Python SDK `>=2.2.0,<3`. Use the same Python environment in the MCP launch configuration that you installed these dependencies into. `python -m pip show mcp mcp-types jsonschema` reports the effective versions; installing a new environment does not update a different Python executable used by your editor.
+
+The server callbacks validate their advertised input schemas before calling external services or creating files. Missing or incorrectly typed fields return an error tool result (`isError: true`), not a generated report or a successful empty response. Omitted optional fields keep their existing defaults.
+
 ### 2. Configure the Fabric Data Agent URL
 
 Open `src/cli/mcp-config.json` and replace the placeholder in `wwi-sales-data`:
@@ -113,6 +117,9 @@ Research Contoso Ltd — focus on earnings and expansion
 | `wwi-sales-data` | HTTP | Fabric Data Agent — queries the WWI lakehouse |
 | `researcher-agent` | stdio | Local Python process — web search for company intelligence |
 | `sharepoint-agent` | stdio | Local Python process — SharePoint document retrieval |
+| `report-generator` | stdio | Local Python process — DOCX/PPTX reports with citations |
+
+Run `python -m pytest tests/integration/` from the repository root to exercise the real stdio servers with mock external services, including rejected inputs and readable report artifacts. These tests do not call live Fabric or Graph endpoints. See [Contributing](../../CONTRIBUTING.md#mcp-sdk-compatibility) for the SDK floor/fresh-resolution checks and error compatibility policy.
 
 ## Troubleshooting
 

@@ -1,323 +1,367 @@
-"""Integration tests for the Researcher and SharePoint MCP servers.
-
-These tests start each MCP server as a subprocess, communicate via stdio
-using the MCP JSON-RPC protocol, and verify that the servers correctly
-advertise their tools and handle tool invocations.
-
-Run with:  pytest tests/integration/test_mcp_servers.py -m integration
-Skip in fast CI by excluding the integration marker.
-"""
+"""Real stdio protocol tests with mock external services and real report files."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
+from docx import Document
+from mcp.types.version import LATEST_HANDSHAKE_VERSION
+from pptx import Presentation
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.integration
 
-_INITIALIZE_REQUEST: dict[str, Any] = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "test-client", "version": "0.1.0"},
+_ROOT = Path(__file__).resolve().parents[2]
+_SERVERS = {
+    "researcher": ("researcher-agent", ["research_company"]),
+    "sharepoint": ("sharepoint-agent", ["search_documents", "get_document_content"]),
+    "report_generator": ("report-generator", ["generate_report"]),
+}
+_VALID_ARGUMENTS = {
+    "research_company": {"company_name": "Tailspin Toys"},
+    "search_documents": {"query": "Tailspin"},
+    "get_document_content": {"drive_id": "sample-drive", "item_id": "sample-item"},
+    "generate_report": {"title": "MCP Sales Report", "customer_name": "Tailspin Toys"},
+}
+_SCHEMA_CONTRACTS = {
+    "research_company": {
+        "type": "object",
+        "properties": {"company_name": {"type": "string"}, "focus_areas": {"type": "string"}},
+        "required": ["company_name"],
+    },
+    "search_documents": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "site_id": {"type": "string"}},
+        "required": ["query"],
+    },
+    "get_document_content": {
+        "type": "object",
+        "properties": {"drive_id": {"type": "string"}, "item_id": {"type": "string"}},
+        "required": ["drive_id", "item_id"],
+    },
+    "generate_report": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "customer_name": {"type": "string"},
+            "format": {"type": "string", "enum": ["docx", "pptx"], "default": "docx"},
+            "pipeline_data": {"type": "array", "items": {"type": "object"}},
+            "research_data": {"type": "object", "additionalProperties": True},
+            "sharepoint_docs": {"type": "array", "items": {"type": "object"}},
+            "forecast_data": {"type": "object", "additionalProperties": True},
+            "additional_context": {"type": "string"},
+        },
+        "required": ["title", "customer_name"],
+        "additionalProperties": False,
     },
 }
 
-_INITIALIZED_NOTIFICATION: dict[str, Any] = {
-    "jsonrpc": "2.0",
-    "method": "notifications/initialized",
-}
 
-_LIST_TOOLS_REQUEST: dict[str, Any] = {
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tools/list",
-    "params": {},
-}
+def _without_descriptions(value):
+    if isinstance(value, dict):
+        return {key: _without_descriptions(item) for key, item in value.items() if key != "description"}
+    if isinstance(value, list):
+        return [_without_descriptions(item) for item in value]
+    return value
 
 
-def _call_tool_request(tool_name: str, arguments: dict[str, Any], req_id: int = 3) -> dict[str, Any]:
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
-    }
+@dataclass
+class StdioClient:
+    process: asyncio.subprocess.Process
+    stderr: list[str] = field(default_factory=list)
+    notifications: list[dict[str, Any]] = field(default_factory=list)
+    request_id: int = 0
+
+    async def send(self, message: dict[str, Any]) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.write((json.dumps(message) + "\n").encode())
+        await self.process.stdin.drain()
+
+    async def request(self, method: str, params: Any = None) -> dict[str, Any]:
+        self.request_id += 1
+        message = {"jsonrpc": "2.0", "id": self.request_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        await self.send(message)
+        assert self.process.stdout is not None
+        async with asyncio.timeout(15):
+            while True:
+                line = await self.process.stdout.readline()
+                assert line, f"Server closed stdout: {''.join(self.stderr)}"
+                response = json.loads(line)
+                assert response["jsonrpc"] == "2.0"
+                if response.get("id") == self.request_id:
+                    return response
+                assert response.get("id") is None, response
+                self.notifications.append(response)
+
+    async def call(self, name: str, arguments: Any) -> dict[str, Any]:
+        return await self.request("tools/call", {"name": name, "arguments": arguments})
 
 
-def _encode_message(msg: dict[str, Any]) -> bytes:
-    """Encode a JSON-RPC message as newline-delimited JSON for MCP stdio transport."""
-    return (json.dumps(msg) + "\n").encode()
+@asynccontextmanager
+async def _server(server_name: str, cwd: Path, protocol: str = "2024-11-05", fault: str | None = None):
+    module = f"src.agents.{server_name}.mcp_server"
+    command = ["-m", module]
+    if fault is not None:
+        target = {
+            "researcher": "research_company",
+            "sharepoint": "search_documents",
+            "report_generator": "generate_docx",
+        }[server_name]
+        failure = "RuntimeError('programmer fault')"
+        if fault == "operational":
+            failure = {
+                "researcher": "json.JSONDecodeError('invalid provider JSON', '', 0)",
+                "sharepoint": "ClientAuthenticationError('credential unavailable')",
+                "report_generator": "PermissionError('cannot write report')",
+            }[server_name]
+        definition = "def" if server_name == "report_generator" else "async def"
+        script = (
+            "import asyncio, importlib, json, sys\n"
+            "from azure.core.exceptions import ClientAuthenticationError\n"
+            "module = importlib.import_module(sys.argv[1])\n"
+            f"{definition} fail(*args, **kwargs):\n"
+            f"    raise {failure}\n"
+            f"module.{target} = fail\n"
+            "asyncio.run(module.main())\n"
+        )
+        command = ["-c", script, module]
 
-
-async def _read_response(stdout: asyncio.StreamReader) -> dict[str, Any]:
-    """Read a single JSON-RPC response line from the MCP server's stdout.
-
-    The MCP Python SDK stdio transport uses newline-delimited JSON:
-    one JSON-RPC message per line.
-    """
-    while True:
-        line = await asyncio.wait_for(stdout.readline(), timeout=15)
-        if not line:
-            raise RuntimeError("MCP server closed stdout unexpectedly")
-        decoded = line.decode().strip()
-        if not decoded:
-            continue
-        return json.loads(decoded)
-
-
-async def _start_mcp_server(module: str, env_overrides: dict[str, str] | None = None) -> asyncio.subprocess.Process:
-    """Start an MCP server as a subprocess."""
-    import os
-
-    env = {**os.environ, **(env_overrides or {})}
-    proc = await asyncio.create_subprocess_exec(
+    process = await asyncio.create_subprocess_exec(
         sys.executable,
-        "-m",
-        module,
+        *command,
+        cwd=cwd,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(filter(None, [str(_ROOT), os.environ.get("PYTHONPATH")])),
+            "SEARCH_PROVIDER": "mock",
+            "SHAREPOINT_MODE": "mock",
+        },
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env,
     )
-    return proc
+    client = StdioClient(process)
 
+    async def drain_stderr():
+        assert process.stderr is not None
+        async for line in process.stderr:
+            client.stderr.append(line.decode(errors="replace"))
 
-async def _initialize_server(proc: asyncio.subprocess.Process) -> dict[str, Any]:
-    """Send initialize + initialized notification, return the init response."""
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-
-    proc.stdin.write(_encode_message(_INITIALIZE_REQUEST))
-    await proc.stdin.drain()
-
-    response = await _read_response(proc.stdout)
-
-    # Send the initialized notification (no response expected)
-    proc.stdin.write(_encode_message(_INITIALIZED_NOTIFICATION))
-    await proc.stdin.drain()
-
-    # Small delay to let the server process the notification
-    await asyncio.sleep(0.1)
-
-    return response
-
-
-async def _cleanup(proc: asyncio.subprocess.Process) -> None:
-    """Terminate the server process cleanly."""
-    if proc.returncode is None:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            proc.kill()
-
-
-# ---------------------------------------------------------------------------
-# Researcher Agent Tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_researcher_list_tools():
-    """Researcher MCP server advertises the research_company tool."""
-    proc = await _start_mcp_server(
-        "src.agents.researcher.mcp_server",
-        env_overrides={"SEARCH_PROVIDER": "mock"},
-    )
+    stderr_task = asyncio.create_task(drain_stderr())
     try:
-        await _initialize_server(proc)
-
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-
-        proc.stdin.write(_encode_message(_LIST_TOOLS_REQUEST))
-        await proc.stdin.drain()
-
-        response = await _read_response(proc.stdout)
-
-        assert "result" in response, f"Expected 'result' in response, got: {response}"
-        tools = response["result"]["tools"]
-        assert len(tools) >= 1
-
-        tool_names = [t["name"] for t in tools]
-        assert "research_company" in tool_names
-
-        # Verify schema shape
-        research_tool = next(t for t in tools if t["name"] == "research_company")
-        assert "inputSchema" in research_tool
-        assert "company_name" in research_tool["inputSchema"]["properties"]
+        initialized = await client.request(
+            "initialize",
+            {
+                "protocolVersion": protocol,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.1.0"},
+            },
+        )
+        assert "error" not in initialized, initialized
+        result = initialized["result"]
+        assert result["serverInfo"]["name"] == _SERVERS[server_name][0]
+        assert result["protocolVersion"] == protocol
+        assert "tools" in result["capabilities"]
+        await client.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        yield client
     finally:
-        await _cleanup(proc)
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        await stderr_task
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_researcher_call_tool_mock():
-    """Researcher MCP server returns mock data for Tailspin Toys."""
-    proc = await _start_mcp_server(
-        "src.agents.researcher.mcp_server",
-        env_overrides={"SEARCH_PROVIDER": "mock"},
-    )
-    try:
-        await _initialize_server(proc)
+def _tool_result(response, *, is_error=False):
+    assert "error" not in response, response
+    result = response["result"]
+    assert result["isError"] is is_error
+    assert "is_error" not in result
+    assert "structuredContent" not in result
+    assert len(result["content"]) == 1
+    assert result["content"][0]["type"] == "text"
+    return result["content"][0]["text"]
 
-        assert proc.stdin is not None
-        assert proc.stdout is not None
 
-        request = _call_tool_request("research_company", {"company_name": "Tailspin Toys"})
-        proc.stdin.write(_encode_message(request))
-        await proc.stdin.drain()
+@pytest.mark.parametrize("server_name", _SERVERS)
+@pytest.mark.parametrize("protocol", ["2024-11-05", LATEST_HANDSHAKE_VERSION])
+async def test_initialize_and_advertised_schema_contract(server_name, protocol, tmp_path):
+    async with _server(server_name, tmp_path, protocol) as client:
+        response = await client.request("tools/list", {})
+        assert "error" not in response, response
+        tools = response["result"]["tools"]
+        assert [tool["name"] for tool in tools] == _SERVERS[server_name][1]
+        for tool in tools:
+            assert "input_schema" not in tool
+            assert "outputSchema" not in tool
+            assert _without_descriptions(tool["inputSchema"]) == _SCHEMA_CONTRACTS[tool["name"]]
 
-        response = await _read_response(proc.stdout)
 
-        assert "result" in response, f"Expected 'result' in response, got: {response}"
-        content = response["result"]["content"]
-        assert len(content) >= 1
-        assert content[0]["type"] == "text"
-
-        data = json.loads(content[0]["text"])
+async def test_research_valid_calls_before_listing(tmp_path):
+    async with _server("researcher", tmp_path) as client:
+        text = _tool_result(
+            await client.call(
+                "research_company", {"company_name": "Tailspin Toys", "focus_areas": "custom", "extra": 1}
+            )
+        )
+        data = json.loads(text)
         assert data["company_name"] == "Tailspin Toys"
-        assert len(data["articles"]) > 0
-        assert "key_metrics" in data
-    finally:
-        await _cleanup(proc)
+        assert data["articles"]
+        assert data["key_metrics"]
+        generic = json.loads(_tool_result(await client.call("research_company", {"company_name": "UnknownCorp"})))
+        assert generic["company_name"] == "UnknownCorp"
+        assert generic["articles"] == []
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_researcher_call_tool_unknown_company():
-    """Researcher MCP server returns a generic response for an unknown company in mock mode."""
-    proc = await _start_mcp_server(
-        "src.agents.researcher.mcp_server",
-        env_overrides={"SEARCH_PROVIDER": "mock"},
-    )
-    try:
-        await _initialize_server(proc)
-
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-
-        request = _call_tool_request("research_company", {"company_name": "UnknownCorp"})
-        proc.stdin.write(_encode_message(request))
-        await proc.stdin.drain()
-
-        response = await _read_response(proc.stdout)
-
-        assert "result" in response
-        data = json.loads(response["result"]["content"][0]["text"])
-        assert data["company_name"] == "UnknownCorp"
-        assert data["articles"] == []
-    finally:
-        await _cleanup(proc)
+async def test_sharepoint_valid_calls_before_listing(tmp_path):
+    async with _server("sharepoint", tmp_path) as client:
+        documents = json.loads(
+            _tool_result(await client.call("search_documents", {"query": "Tailspin", "site_id": "sample", "extra": 1}))
+        )
+        assert documents
+        assert "Tailspin" in documents[0]["name"]
+        assert documents[0]["url"]
+        empty = json.loads(_tool_result(await client.call("search_documents", {"query": "nonexistent-xyz-12345"})))
+        assert empty == []
+        content = json.loads(
+            _tool_result(
+                await client.call(
+                    "get_document_content", {"drive_id": "sample-drive", "item_id": "sample-item", "extra": 1}
+                )
+            )
+        )
+        assert "Tailspin Toys" in content["content_text"]
+        assert content["url"]
+        assert content["size"] > 0
 
 
-# ---------------------------------------------------------------------------
-# SharePoint Agent Tests
-# ---------------------------------------------------------------------------
+async def test_report_valid_calls_create_readable_artifacts_before_listing(tmp_path):
+    async with _server("report_generator", tmp_path) as client:
+        for format_name in ["docx", "pptx"]:
+            arguments = {
+                **_VALID_ARGUMENTS["generate_report"],
+                "research_data": {
+                    "articles": [{"title": "Sample research citation", "url": "https://example.com/research"}]
+                },
+                "sharepoint_docs": [
+                    {"name": "Sample account plan", "url": "https://example.com/plan", "excerpt": "Sample context"}
+                ],
+            }
+            if format_name == "pptx":
+                arguments["format"] = format_name
+            data = json.loads(_tool_result(await client.call("generate_report", arguments)))
+            assert data["status"] == "success"
+            assert data["format"] == format_name
+            assert data["title"] == arguments["title"]
+            output = tmp_path / data["file_path"]
+            assert output.resolve().is_relative_to(tmp_path)
+            assert output.suffix == f".{format_name}"
+            if format_name == "docx":
+                document = Document(output)
+                text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+                assert "Pipeline Overview" in text
+                assert "Sources & Citations" in text
+            else:
+                presentation = Presentation(output)
+                text = "\n".join(
+                    shape.text_frame.text
+                    for slide in presentation.slides
+                    for shape in slide.shapes
+                    if shape.has_text_frame
+                )
+                assert len(presentation.slides) >= 4
+            assert arguments["title"] in text
+            assert "Sample research citation" in text
+            assert "Sample account plan" in text
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_sharepoint_list_tools():
-    """SharePoint MCP server advertises search_documents and get_document_content tools."""
-    proc = await _start_mcp_server(
-        "src.agents.sharepoint.mcp_server",
-        env_overrides={"SHAREPOINT_MODE": "mock"},
-    )
-    try:
-        await _initialize_server(proc)
-
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-
-        proc.stdin.write(_encode_message(_LIST_TOOLS_REQUEST))
-        await proc.stdin.drain()
-
-        response = await _read_response(proc.stdout)
-
-        assert "result" in response, f"Expected 'result' in response, got: {response}"
-        tools = response["result"]["tools"]
-        assert len(tools) >= 2
-
-        tool_names = [t["name"] for t in tools]
-        assert "search_documents" in tool_names
-        assert "get_document_content" in tool_names
-
-        # Verify schema for search_documents
-        search_tool = next(t for t in tools if t["name"] == "search_documents")
-        assert "query" in search_tool["inputSchema"]["properties"]
-    finally:
-        await _cleanup(proc)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_sharepoint_search_documents_mock():
-    """SharePoint MCP server returns mock documents for a matching query."""
-    proc = await _start_mcp_server(
-        "src.agents.sharepoint.mcp_server",
-        env_overrides={"SHAREPOINT_MODE": "mock"},
-    )
-    try:
-        await _initialize_server(proc)
-
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-
-        request = _call_tool_request("search_documents", {"query": "Tailspin"})
-        proc.stdin.write(_encode_message(request))
-        await proc.stdin.drain()
-
-        response = await _read_response(proc.stdout)
-
-        assert "result" in response, f"Expected 'result' in response, got: {response}"
-        content = response["result"]["content"]
-        assert len(content) >= 1
-        assert content[0]["type"] == "text"
-
-        data = json.loads(content[0]["text"])
-        assert isinstance(data, list)
-        assert len(data) > 0
-        assert "name" in data[0]
-        assert "Tailspin" in data[0]["name"]
-    finally:
-        await _cleanup(proc)
+@pytest.mark.parametrize("server_name", _SERVERS)
+async def test_schema_rejections_and_recovery(server_name, tmp_path):
+    async with _server(server_name, tmp_path) as client:
+        for tool_name in _SERVERS[server_name][1]:
+            valid = _VALID_ARGUMENTS[tool_name]
+            schema = _SCHEMA_CONTRACTS[tool_name]
+            rejected = [None, {}]
+            rejected.extend(
+                {key: value for key, value in valid.items() if key != required} for required in schema["required"]
+            )
+            invalid_values = {
+                "string": [None, True, 42, [], {}],
+                "array": [None, True, 42, "wrong", {}],
+                "object": [None, True, 42, "wrong", []],
+            }
+            for key, property_schema in schema["properties"].items():
+                rejected.extend({**valid, key: value} for value in invalid_values[property_schema["type"]])
+            if tool_name == "generate_report":
+                rejected.extend({**valid, "format": value} for value in ["pdf", "DOCX", "PPTX", ""])
+                rejected.append({**valid, "unknown": "extra"})
+                rejected.extend(
+                    {**valid, field: [value]}
+                    for field in ["pipeline_data", "sharepoint_docs"]
+                    for value in [None, True, 42, "wrong", []]
+                )
+            for arguments in rejected:
+                text = _tool_result(await client.call(tool_name, arguments), is_error=True)
+                assert text.startswith("Input validation error: ")
+                assert not (tmp_path / "output").exists()
+            missing = await client.request("tools/call", {"name": tool_name})
+            assert _tool_result(missing, is_error=True).startswith("Input validation error: ")
+        unknown = await client.call("unknown_tool", {})
+        assert _tool_result(unknown, is_error=True) == "Unknown tool: unknown_tool"
+        assert not (tmp_path / "output").exists()
+        for tool_name in _SERVERS[server_name][1]:
+            _tool_result(await client.call(tool_name, _VALID_ARGUMENTS[tool_name]))
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_sharepoint_search_documents_no_results():
-    """SharePoint MCP server returns an empty list for a non-matching query."""
-    proc = await _start_mcp_server(
-        "src.agents.sharepoint.mcp_server",
-        env_overrides={"SHAREPOINT_MODE": "mock"},
-    )
-    try:
-        await _initialize_server(proc)
+@pytest.mark.parametrize("server_name", _SERVERS)
+async def test_protocol_rejections_and_recovery(server_name, tmp_path):
+    async with _server(server_name, tmp_path) as client:
+        tool_name = _SERVERS[server_name][1][0]
+        for arguments in [[], "wrong", 42, True]:
+            response = await client.call(tool_name, arguments)
+            assert "result" not in response
+            assert response["error"]["code"] == -32602
+        for params in [{"arguments": {}}, {"name": 42, "arguments": {}}]:
+            response = await client.request("tools/call", params)
+            assert "result" not in response
+            assert response["error"]["code"] == -32602
+        unknown = await client.request("nonexistent/method", {})
+        assert unknown["error"]["code"] == -32601
+        assert not (tmp_path / "output").exists()
+        # Invalid envelopes are rejected by the transport before request dispatch.
+        await client.send({"jsonrpc": "2.0", "id": "invalid-envelope", "method": "tools/call", "params": []})
+        assert client.process.stdin is not None
+        client.process.stdin.write(b"{not valid json}\n")
+        await client.process.stdin.drain()
+        ping = await client.request("ping", {})
+        assert "result" in ping
+        assert "error" not in ping
+        assert not (tmp_path / "output").exists()
+        _tool_result(await client.call(tool_name, _VALID_ARGUMENTS[tool_name]))
 
-        assert proc.stdin is not None
-        assert proc.stdout is not None
 
-        request = _call_tool_request("search_documents", {"query": "nonexistent-xyz-12345"})
-        proc.stdin.write(_encode_message(request))
-        await proc.stdin.drain()
-
-        response = await _read_response(proc.stdout)
-
-        assert "result" in response
-        data = json.loads(response["result"]["content"][0]["text"])
-        assert isinstance(data, list)
-        assert len(data) == 0
-    finally:
-        await _cleanup(proc)
+@pytest.mark.parametrize("server_name", _SERVERS)
+@pytest.mark.parametrize("fault", ["operational", "unexpected"])
+async def test_error_envelopes_from_real_dispatch(server_name, fault, tmp_path):
+    async with _server(server_name, tmp_path, fault=fault) as client:
+        tool_name = _SERVERS[server_name][1][0]
+        response = await client.call(tool_name, _VALID_ARGUMENTS[tool_name])
+        if fault == "operational":
+            assert _tool_result(response, is_error=True)
+        else:
+            assert "result" not in response
+            assert response["error"]["code"] == 0
+            assert response["error"]["message"] == "programmer fault"
+        assert "result" in await client.request("ping", {})

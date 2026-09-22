@@ -65,3 +65,45 @@ class TestMCPConfigStructure:
         """Server descriptions should be unique to avoid routing confusion."""
         descriptions = [s["description"] for s in mcp_config["mcpServers"].values()]
         assert len(descriptions) == len(set(descriptions)), "Duplicate server descriptions found"
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "key", "expected"),
+    [
+        (
+            Path(".github") / "mcp.json",
+            "mcpServers",
+            {
+                "wwi-sales-data": ["src/cli/fabric_mcp_proxy.py"],
+                "report-generator": ["-m", "src.agents.report_generator.mcp_server"],
+            },
+        ),
+        (
+            Path(".vscode") / "mcp.json",
+            "servers",
+            {"report-generator": ["-m", "src.agents.report_generator.mcp_server"]},
+        ),
+        (
+            Path("src") / "cli" / "mcp-config.json",
+            "mcpServers",
+            {
+                "researcher-agent": ["-m", "src.agents.researcher.mcp_server"],
+                "sharepoint-agent": ["-m", "src.agents.sharepoint.mcp_server"],
+                "report-generator": ["-m", "src.agents.report_generator.mcp_server"],
+            },
+        ),
+    ],
+)
+def test_all_local_launch_configurations(relative_path, key, expected):
+    root = Path(__file__).resolve().parents[2]
+    config = json.loads((root / relative_path).read_text(encoding="utf-8"))
+    local_servers = {name: server for name, server in config[key].items() if server["type"] == "stdio"}
+    assert set(local_servers) == set(expected)
+    for name, arguments in expected.items():
+        assert local_servers[name]["command"] == "python"
+        assert local_servers[name]["args"] == arguments
+        if arguments[0] == "-m":
+            source = root.joinpath(*arguments[1].split(".")).with_suffix(".py")
+        else:
+            source = root.joinpath(*arguments[0].split("/"))
+        assert source.is_file()

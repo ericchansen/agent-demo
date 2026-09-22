@@ -8,6 +8,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+class DocumentContentError(ValueError):
+    """The retrieved content is not a readable Word document."""
+
+
 # ---------------------------------------------------------------------------
 # Mock data (Wide World Importers themed)
 # ---------------------------------------------------------------------------
@@ -195,8 +200,15 @@ async def get_document_content(drive_id: str, item_id: str) -> dict[str, Any]:
 def _extract_docx_text(raw: bytes) -> str:
     """Extract plain text from an in-memory DOCX file."""
     import io  # noqa: PLC0415
+    from zipfile import BadZipFile  # noqa: PLC0415
 
     from docx import Document  # noqa: PLC0415
+    from docx.opc.exceptions import PackageNotFoundError  # noqa: PLC0415
+    from docx.oxml.exceptions import InvalidXmlError  # noqa: PLC0415
+    from lxml.etree import XMLSyntaxError  # noqa: PLC0415
 
-    doc = Document(io.BytesIO(raw))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    try:
+        doc = Document(io.BytesIO(raw))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    except (BadZipFile, PackageNotFoundError, InvalidXmlError, XMLSyntaxError, KeyError, ValueError) as exc:
+        raise DocumentContentError(str(exc)) from exc

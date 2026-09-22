@@ -38,10 +38,10 @@ uv sync --extra dev                # install project + dev tools (or: pip instal
 ruff check .                       # lint
 ruff format --check .              # formatting (run `ruff format .` to auto-fix)
 mypy src/                          # type checking
-pytest tests/unit/                 # unit tests
+pytest tests/                      # unit and mock-backed stdio integration tests
 ```
 
-All four must pass. The Bicep template is also validated (`az bicep build --file infra/main.bicep`).
+All four must pass. CI tests the MCP 2.2.0/jsonschema 4.20.0/Azure AI Projects 2.7.0 floors and a fresh resolution within the declared dependency ranges. The Bicep template is also validated (`az bicep build --file infra/main.bicep`).
 
 ## Key Directories
 
@@ -65,3 +65,4 @@ All four must pass. The Bicep template is also validated (`az bicep build --file
 - **Auth split** — interactive for CLI, managed identity for Foundry, OIDC for CI, bot reg for M365.
 - **WorkIQ demo mode** — production targets WorkIQ / OBO flows; the demo tenant uses mock M365 activity data until provisioning is available.
 - **No customer data in repo** — all data is Wide World Importers (Microsoft sample).
+- **MCP 2 validation** — low-level callbacks must validate the advertised JSON Schema before calling business handlers or creating output. Validation and expected operational failures return `CallToolResult(is_error=True)`; unexpected programmer errors remain protocol errors and cancellation propagates.

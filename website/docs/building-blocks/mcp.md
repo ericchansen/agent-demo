@@ -62,37 +62,68 @@ The Fabric Data Agent uses HTTP (it's a cloud service). WorkIQ uses stdio via np
 
 ## Writing your own MCP server
 
-If you want to add a new tool to the agent, you write an MCP server. The simplest approach:
+The local Python servers use MCP SDK 2 (`>=2.2.0,<3`). Low-level servers register callbacks and return explicit result types. Unlike SDK 1, SDK 2 does **not** automatically validate tool arguments: validate the advertised schema before looking up data, making requests, or writing files.
 
 ```python
-# Example: a minimal MCP server using the Python SDK
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+import asyncio
 
-server = Server("my-tool")
+from mcp.server import Server, ServerRequestContext
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
-@server.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="lookup_customer",
-            description="Look up customer information by name",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Customer name"}
-                },
-                "required": ["name"]
-            }
-        )
-    ]
+from src.agents.mcp_validation import tool_error, validate_tool_arguments
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    if name == "lookup_customer":
-        # Your logic here
-        return [TextContent(type="text", text=f"Customer: {arguments['name']}")]
+tool = Tool(
+    name="lookup_customer",
+    description="Return the customer name supplied to this example tool",
+    input_schema={
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+)
+
+
+async def list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListToolsResult:
+    return ListToolsResult(tools=[tool])
+
+
+async def call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
+    if params.name != tool.name:
+        return tool_error(f"Unknown tool: {params.name}")
+    arguments = params.arguments or {}
+    if error := validate_tool_arguments(tool, arguments):
+        return error
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Customer: {arguments['name']}")],
+        is_error=False,
+    )
+
+
+server = Server("my-tool", on_list_tools=list_tools, on_call_tool=call_tool)
+
+
+async def main() -> None:
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+This example runs from the installed accelerator repository and reuses its `jsonschema`-based validation helper. The helper returns `CallToolResult(is_error=True)` on schema violations, without coercion or default insertion. Python fields use `input_schema` and `is_error`; the JSON protocol still sends `inputSchema` and `isError`.
+
+Expected operational failures should also return explicit error tool results through narrowly scoped exception handling. Unexpected programmer errors use the SDK 2 protocol-error path; do not hide them behind a blanket catch or a success-shaped fallback. The project's stdio integration tests exercise both cases.
+
+See the [SDK 2 migration guide](https://github.com/modelcontextprotocol/python-sdk/blob/v2.2.0/docs/migration.md) for the callback, validation, and error-handling changes.
 
 > 📖 [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) · [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) · [Building MCP servers](https://modelcontextprotocol.io/docs/guides/building-servers)
 
